@@ -71,8 +71,14 @@ jobs:
             sleep 2
           done
           cat /tmp/health.json
-          grep -q '"profile": "development"' /tmp/health.json
-          grep -q '"status"' /tmp/health.json
+          python - <<'PY'
+          import json
+
+          with open("/tmp/health.json", encoding="utf-8") as stream:
+              health = json.load(stream)
+          assert health["profile"] == "development", health
+          assert health.get("status"), health
+          PY
           curl -fsS http://127.0.0.1:18000/ | grep -q 'Altropos'
       - name: Verify data survives restart
         run: |
