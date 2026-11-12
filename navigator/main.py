@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import asyncio
+from contextlib import asynccontextmanager
 import time
 from pathlib import Path
 from typing import Any
@@ -16,7 +19,6 @@ from navigator.ui.integration import (
     RouterResolution,
     integration_summary,
     load_feature_router,
-    synthetic_allowed,
 )
 
 log = logging.getLogger("navigator.main")
@@ -66,7 +68,8 @@ def _include_feature(
             synthetic_state,
         )
 
-    resolution = load_feature_router(key)
+    resolution = (RouterResolution(key=key, reason="Явно выбран демонстрационный режим.")
+                  if allow_synthetic else load_feature_router(key))
     if resolution.router is not None:
         app.include_router(resolution.router)
         return resolution, synthetic_state
@@ -93,9 +96,41 @@ def create_app(
     ask_router: Any | None = None,
     documents_router: Any | None = None,
     synthetic_fallback: bool | None = None,
+    document_service: Any | None = None,
 ) -> FastAPI:
     settings = get_settings()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        stop = asyncio.Event()
+        worker = None
+        if app.state.integration["documents"]["mode"] == "real" and documents_router is None:
+            from navigator.documents.router import document_worker
+            from navigator.documents.service import DocumentService
+            if document_service is None:
+                try:
+                    from navigator.rag.router import initialize_rag
+                except ModuleNotFoundError as exc:
+                    if exc.name != "navigator.rag.router":
+                        raise
+                    from navigator.db import Store
+                    app.state.store = Store(settings.data_dir)
+                    app.state.document_service = DocumentService(app.state.store, settings)
+                else:
+                    initialize_rag(app)
+                    app.state.document_service = DocumentService(app.state.store, settings, app.state.indexer)
+            else:
+                app.state.document_service = document_service
+            worker = asyncio.create_task(document_worker(app.state.document_service, stop))
+        try:
+            yield
+        finally:
+            stop.set()
+            if worker is not None:
+                await worker
+
     app = FastAPI(
+        lifespan=lifespan,
         title="Altropos Navigator",
         description="Навигатор по регламентам с проверяемыми источниками.",
         version="0.1.0",
@@ -103,7 +138,10 @@ def create_app(
     app.state.settings = settings
     app.state.health_cache = None
 
-    allow_synthetic = synthetic_allowed(settings, synthetic_fallback)
+    # No development-profile implicit fallback. Environment is an explicit opt-in.
+    raw_synthetic = os.getenv("UI_SYNTHETIC_FALLBACK", "").strip().lower()
+    allow_synthetic = (synthetic_fallback if synthetic_fallback is not None
+                       else raw_synthetic in {"1", "true", "yes", "on", "force"})
     if app.state.settings.profile != "development" and allow_synthetic:
         log.warning(
             "Synthetic UI fallback is enabled explicitly for profile %s; "
@@ -126,7 +164,7 @@ def create_app(
         app,
         key="documents",
         explicit_router=documents_router,
-        allow_synthetic=allow_synthetic,
+        allow_synthetic=allow_synthetic and ask_resolution.mode != "real",
         synthetic_builder=build_documents_router,
         synthetic_state=synthetic_state,
     )
@@ -158,7 +196,7 @@ def create_app(
             "integration": app.state.integration,
             "profile": settings.profile,
             "max_upload_mb": settings.max_upload_mb,
-            "ask_timeout_seconds": int(settings.request_timeout) + 15,
+            "ask_timeout_seconds": int(settings.request_timeout * 4) + 30,
             "max_question_length": 4000,
         }
 

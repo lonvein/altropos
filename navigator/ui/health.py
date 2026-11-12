@@ -102,10 +102,10 @@ async def build_health(settings: Settings, integration: dict[str, Any]) -> dict[
     data_mode = integration.get("data_mode", "unavailable")
     if data_mode in {"degraded", "partial", "unavailable"}:
         application_status = "degraded"
+    elif ml.get("status") in {"unavailable", "degraded"} or llm.get("status") in {"unavailable", "degraded"}:
+        application_status = "degraded"
     elif data_mode == "synthetic" or settings.profile == "development":
         application_status = "limited"
-    elif ml.get("status") == "unavailable" or llm.get("status") == "unavailable":
-        application_status = "degraded"
     elif ml.get("status") == "disabled" or llm.get("status") == "disabled":
         application_status = "limited"
     else:

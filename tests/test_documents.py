@@ -71,7 +71,13 @@ def test_queue_lifecycle_and_recovery(store_and_service):
     info1 = queue.get_job(j1)
     assert info1["status"] == "processing"
 
-    # Имитация аварийного перезапуска сервиса
+    # A live worker cannot be recovered or concurrently acquired.
+    other = DocumentService(store=store, settings=service.settings)
+    assert other.queue.acquire_next_job() is None
+    assert other.queue.recover_stale_jobs() == 0
+    assert queue.acquire_next_job() is None
+    # Simulate OS releasing the lock after process termination.
+    queue._unlock_writer()
     recovered = queue.recover_stale_jobs()
     assert recovered == 1
 
@@ -183,6 +189,8 @@ def test_patch_metadata(store_and_service, tmp_path):
         ]
     )
     updated = service.patch_metadata(doc_id, patch)
+    assert updated["status"] == "ready"
+    assert service.store.document(doc_id)["active_publication"]
     assert updated["title"] == "Новый уточнённый заголовок"
     assert updated["metadata"]["number"] == "555-Р"
     assert updated["metadata"]["valid_to"] == "2026-12-31"

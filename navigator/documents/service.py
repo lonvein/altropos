@@ -1,84 +1,29 @@
 """Сервис управления жизненным циклом документов, очередью и индексацией."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from pathlib import Path
-from uuid import uuid4
 
 from navigator.config import Settings, get_settings
-from navigator.db import Store, fragments_digest
+from navigator.db import Store
 from navigator.documents.queue import JobQueue
 from navigator.documents.storage import DocumentStorage
 from navigator.ingestion import parse_file
 from navigator.ingestion.common import document_ids, sha256_bytes, to_fragments
 from navigator.ingestion.metadata_extractor import extract_metadata
 from navigator.interfaces import Indexer
-from navigator.schemas import Artifact, Document, Fragment, IndexManifest, IndexResult, MetadataPatch
+from navigator.schemas import Document, MetadataPatch
 
 logger = logging.getLogger(__name__)
-
-
-class FallbackBM25Indexer:
-    """Легковесный BM25-индексатор для автономного режима и тестов (до подключения Климовского RAG)."""
-
-    def __init__(self, store: Store):
-        self.store = store
-
-    def index_document(self, document_id: str, fragments: list[Fragment]) -> IndexResult:
-        row = self.store.document(document_id)
-        if not row or not row.get("payload"):
-            raise ValueError(f"Документ {document_id} не зарегистрирован в Store")
-        doc = Document.model_validate_json(row["payload"])
-
-        pub_id = uuid4().hex
-        pub_dir = self.store.root / "indexes" / pub_id
-        pub_dir.mkdir(parents=True, exist_ok=True)
-
-        # Подготавливаем файл BM25 артефакта
-        ordered = sorted(fragments, key=lambda f: f.ordinal)
-        bm25_data = {
-            "format": 1,
-            "document_id": document_id,
-            "ids": [f.id for f in ordered],
-            "texts": [f.text for f in ordered],
-        }
-        bm25_bytes = json.dumps(bm25_data, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        (pub_dir / "bm25.json").write_bytes(bm25_bytes)
-
-        digest = fragments_digest(ordered)
-        prefix = f"indexes/{pub_id}/"
-        bm25_artifact = Artifact(
-            path=f"{prefix}bm25.json",
-            sha256=hashlib.sha256(bm25_bytes).hexdigest(),
-        )
-
-        manifest = IndexManifest(
-            publication_id=pub_id,
-            document_id=doc.id,
-            document_version=doc.version,
-            fragments_sha256=digest,
-            mode="bm25",
-            bm25=bm25_artifact,
-            vectors=None,
-            embedding_fingerprint=None,
-        )
-        return self.store.publish(
-            manifest,
-            ordered,
-            warnings=["Режим BM25: векторный поиск и повторное ранжирование отключены."],
-        )
 
 
 def _resolve_indexer(store: Store, settings: Settings, indexer: Indexer | None = None) -> Indexer:
     if indexer is not None:
         return indexer
-    try:
-        from navigator.rag.indexing import Indexer as KlimIndexer
-        return KlimIndexer(store=store, settings=settings)
-    except Exception:
-        return FallbackBM25Indexer(store=store)
+    # Never hide import/configuration failures behind an incompatible fake shard.
+    from navigator.rag.indexing import Indexer as RAGIndexer
+    return RAGIndexer(store=store, settings=settings)
 
 
 class DocumentService:
@@ -96,11 +41,6 @@ class DocumentService:
         )
         self.queue = JobQueue(store=self.store)
         self.indexer = _resolve_indexer(self.store, self.settings, indexer)
-
-        # Автоматическое восстановление зависших задач при инициализации сервиса
-        stale = self.queue.recover_stale_jobs()
-        if stale > 0:
-            logger.info("Восстановлено %d прерванных фоновых задач", stale)
 
     def upload_file(self, filename: str, content: bytes) -> dict:
         """Прием файла, дедупликация по SHA-256 и постановка в очередь обработки."""
@@ -140,7 +80,7 @@ class DocumentService:
             original_path=rel_path,
             media_type=media_type,
             status="queued",
-            metadata=MetadataPatch(title=title[:500]),
+            metadata=MetadataPatch(),
             warnings=[],
         )
         self.store.register_document(doc)
@@ -178,6 +118,9 @@ class DocumentService:
 
         try:
             full_path = self.storage.get_original_path(rel_path)
+            registered = self.store.document(doc_id)
+            if registered is None or sha256_bytes(full_path.read_bytes()) != registered["sha"]:
+                raise ValueError("Changed original requires a new immutable document version")
             parsed = parse_file(full_path)
 
             # Сохраняем адресованные блоки для просмотрщика источников
@@ -189,10 +132,15 @@ class DocumentService:
 
             # Метаданные
             meta = parsed.metadata or extract_metadata(parsed.units, title_hint=parsed.title, filename=filename)
+            previous = self.store.document(doc_id)
+            if previous and previous.get("payload"):
+                saved = Document.model_validate_json(previous["payload"]).metadata
+                meta = MetadataPatch.model_validate({**meta.model_dump(), **saved.model_dump(exclude_none=True)})
             title = (meta.title or parsed.title or Path(filename).stem)[:500]
 
             # Формируем обновленный документ
-            target_status = "needs_review" if parsed.needs_review else "processing"
+            requires_review = parsed.needs_review or not fragments
+            target_status = "needs_review" if requires_review else "processing"
             doc = Document(
                 id=doc_id,
                 version=version,
@@ -212,7 +160,7 @@ class DocumentService:
                 (title, meta.model_dump_json(), doc.model_dump_json(), target_status, doc_id),
             )
 
-            if parsed.needs_review:
+            if requires_review:
                 # Документ требует проверки оператором (например, нечитаемый скан)
                 # Он не включается в поиск до проверки (не публикуется)
                 self.queue.complete_job(
@@ -226,9 +174,10 @@ class DocumentService:
                 )
                 return True
 
-            # Публикуем через индексатор (Климовский или BM25)
+            # Публикуем только через совместимый RAG-индексатор
             index_res = self.indexer.index_document(doc_id, fragments)
 
+            self.store.execute("UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?", (doc_id,))
             self.queue.complete_job(
                 job_id,
                 status="ready",
@@ -242,16 +191,16 @@ class DocumentService:
             )
             return True
 
-        except Exception as exc:
+        except Exception:
             logger.exception("Ошибка обработки документа %s в задаче %s", doc_id, job_id)
             self.store.execute(
-                "UPDATE documents SET status='failed' WHERE id=?",
+                "UPDATE documents SET status='failed', payload=json_set(payload, '$.status', 'failed') WHERE id=?",
                 (doc_id,),
             )
             self.queue.complete_job(
                 job_id,
                 status="failed",
-                error=f"Ошибка обработки файла: {str(exc)}",
+                error="Ошибка обработки файла. Подробности в локальном журнале сервера.",
             )
             return True
 
@@ -273,37 +222,33 @@ class DocumentService:
         return [self._format_doc_record(dict(r)) for r in rows]
 
     def patch_metadata(self, doc_id: str, patch: MetadataPatch) -> dict:
-        row = self.store.document(doc_id)
-        if not row or not row.get("payload"):
-            raise ValueError(f"Документ {doc_id} не найден")
-
-        doc = Document.model_validate_json(row["payload"])
-        current_meta = doc.metadata.model_dump()
-
-        # Накладываем только переданные поля (учитываем model_fields_set)
-        patch_data = patch.model_dump(exclude_unset=True)
-        current_meta.update(patch_data)
-
-        updated_meta = MetadataPatch.model_validate(current_meta)
-        new_title = (updated_meta.title or doc.title)[:500]
-
-        # Если администратор подтвердил review, проверяем возможность перевода в ready
-        new_status = doc.status
-        if patch.reviewed is True and doc.status == "needs_review":
-            # Если документ был needs_review, теперь после подтверждения можно опубликовать
-            frags_rows = self.store.rows("SELECT * FROM fragments WHERE document_id=? ORDER BY ordinal", (doc_id,))
-            if frags_rows:
-                # Уже есть фрагменты
-                new_status = "ready"
-
-        doc.title = new_title
-        doc.metadata = updated_meta
-        doc.status = new_status
-
-        self.store.execute(
-            "UPDATE documents SET title=?, metadata=?, payload=?, status=? WHERE id=?",
-            (new_title, updated_meta.model_dump_json(), doc.model_dump_json(), new_status, doc_id),
-        )
+        # Read/merge/write and optional enqueue must be one transaction. A worker
+        # marks processing while holding the same SQLite writer lock.
+        with self.store.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+            if not row or not row["payload"]:
+                raise ValueError("Документ не найден")
+            if row["status"] == "processing":
+                raise ValueError("Дождитесь окончания обработки")
+            doc = Document.model_validate_json(row["payload"])
+            updated_meta = MetadataPatch.model_validate({
+                **doc.metadata.model_dump(), **patch.model_dump(exclude_unset=True),
+            })
+            doc.title = (updated_meta.title or doc.title)[:500]
+            doc.metadata = updated_meta
+            doc.status = row["status"]
+            reprocess = patch.reviewed is True and doc.status == "needs_review"
+            if reprocess:
+                doc.status = "queued"
+            con.execute("UPDATE documents SET title=?,metadata=?,payload=?,status=? WHERE id=?",
+                        (doc.title, updated_meta.model_dump_json(), doc.model_dump_json(), doc.status, doc_id))
+            if reprocess:
+                from uuid import uuid4
+                payload = {"document_id": doc.id, "version": doc.version, "filename": doc.name,
+                           "rel_path": doc.original_path, "media_type": doc.media_type}
+                con.execute("INSERT INTO jobs(id,kind,payload) VALUES(?,?,?)",
+                            (uuid4().hex, "process_file", json.dumps(payload, ensure_ascii=False)))
         return self.get_document(doc_id)
 
     def _format_doc_record(self, row: dict) -> dict:
@@ -320,7 +265,12 @@ class DocumentService:
                 warnings = payload.get("warnings", [])
             except Exception:
                 pass
+        fragment_id = None
+        if row["status"] == "ready":
+            fragments = self.store.rows("SELECT id FROM fragments WHERE document_id=? ORDER BY ordinal LIMIT 1", (row["id"],))
+            fragment_id = fragments[0]["id"] if fragments else None
         return {
+            "fragment_id": fragment_id,
             "id": row["id"],
             "name": row["name"],
             "title": row["title"],
