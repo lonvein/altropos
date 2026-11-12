@@ -190,6 +190,16 @@ class AnswerPipeline:
                     except ComponentError as exc:
                         if exc.detail.code != "invalid_model_output":
                             raise
+                        # The adapter can reject evidence after parsing a valid
+                        # Draft. Keep a freshly shape-validated copy for repair,
+                        # never as an approved answer or trusted evidence.
+                        rejected_draft = getattr(exc, "draft", None)
+                        if isinstance(rejected_draft, Draft):
+                            try:
+                                draft = Draft.model_validate(
+                                    rejected_draft.model_dump(mode="json"), strict=True)
+                            except ValidationError:
+                                pass
                         issues = ["Исправьте структуру ответа, ID и дословные цитаты; используйте только переданные материалы."]
                     except ValidationError:
                         issues = ["Верните корректный JSON по схеме Draft с дословными цитатами."]

@@ -361,3 +361,45 @@ def test_russian_fragment_not_rejected_by_byte_count(setup):
     assert response.status == "answered" and response.answer_mode == "generated"
     assert kinds(model) == ["generate", "verify"]
     assert model.calls[1][1].fragments == [fragment]
+
+
+def test_adapter_quote_rejection_repairs_attached_draft_once(setup):
+    rejected = setup[4].model_copy(deep=True)
+    rejected.summary[0].evidence[0].quote = "invented quotation"
+    error = failure("invalid_model_output")
+    error.draft = rejected
+    model = Model([error, setup[4]], [Verification(supported=True, complete=True)])
+    response = ask(setup, model)
+    assert response.status == "answered"
+    assert kinds(model) == ["generate", "repair", "verify"]
+    repair_request = model.calls[2][1]
+    assert repair_request.draft == rejected and repair_request.draft is not rejected
+    assert repair_request.fragments == [setup[3]]
+    assert "invented quotation" not in response.model_dump_json()
+
+
+def test_adapter_attached_draft_repair_still_requires_exact_quotes(setup):
+    rejected = setup[4].model_copy(deep=True)
+    rejected.summary[0].evidence[0].quote = "invented quotation"
+    error = failure("invalid_model_output")
+    error.draft = rejected
+    model = Model([error, rejected], [])
+    response = ask(setup, model)
+    assert response.answer_mode == "sources_only" and not response.summary
+    assert kinds(model) == ["generate", "repair"]
+
+
+def test_adapter_attached_draft_repair_still_requires_semantic_support(setup):
+    error = failure("invalid_model_output")
+    error.draft = setup[4]
+    model = Model([error, setup[4]], [Verification(supported=False, complete=False)])
+    assert ask(setup, model).answer_mode == "sources_only"
+    assert kinds(model) == ["generate", "repair", "verify"]
+
+
+def test_adapter_invalid_attached_shape_is_not_used_for_repair(setup):
+    error = failure("invalid_model_output")
+    error.draft = Draft.model_construct(status="answered", summary=[], steps=[])
+    model = Model([error, setup[4]], [Verification(supported=True, complete=True)])
+    assert ask(setup, model).status == "answered"
+    assert kinds(model) == ["generate", "generate", "verify"]
