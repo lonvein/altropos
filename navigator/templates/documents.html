@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}Документы · Altropos{% endblock %}
+
+{% block content %}
+<div class="page-grid page-grid--documents">
+  <section class="panel panel--form" aria-labelledby="upload-title">
+    <div class="panel__header panel__header--compact">
+      <p class="eyebrow">Администрирование</p>
+      <h1 id="upload-title">Загрузить документ</h1>
+      <p class="lead">PDF, DOCX или XLSX. Документ появится в списке и пройдёт обработку в очереди.</p>
+    </div>
+
+    <form id="upload-form" class="stack-form" novalidate data-max-upload-mb="{{ max_upload_mb }}">
+      <div class="field">
+        <label for="document-file">Файл</label>
+        <input type="file" id="document-file" name="file" accept=".pdf,.docx,.xlsx"
+               aria-describedby="file-hint" required>
+        <p id="file-hint" class="field__hint">
+          Поддерживаются PDF, DOCX и XLSX. Не более {{ max_upload_mb }} МБ.
+        </p>
+      </div>
+      <p id="upload-field-error" class="field-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button type="submit" class="button button--primary" id="upload-submit">
+          <span class="button__label">Загрузить</span>
+          <span class="spinner" aria-hidden="true" hidden></span>
+        </button>
+        <span id="upload-state" class="form-state" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+
+    <div id="upload-job" class="job-panel" role="status" aria-live="polite" hidden>
+      <div class="job-panel__head">
+        <strong id="upload-job-label">Задание</strong>
+        <span id="upload-job-status" class="badge status-queued">В очереди</span>
+      </div>
+      <p id="upload-job-detail" class="muted"></p>
+    </div>
+  </section>
+
+  <section class="panel panel--form" aria-labelledby="import-title">
+    <div class="panel__header panel__header--compact">
+      <h2 id="import-title">Импорт с сайта mipt.ru</h2>
+      <p class="lead">Сначала проверьте страницу, затем выберите разрешённые документы для импорта.</p>
+    </div>
+
+    <form id="import-form" class="stack-form" novalidate>
+      <div class="field">
+        <label for="import-url">URL страницы</label>
+        <input type="url" id="import-url" name="url" inputmode="url"
+               placeholder="https://mipt.ru/..." maxlength="2000" required
+               aria-describedby="import-url-hint">
+        <p id="import-url-hint" class="field__hint">
+          Разрешены только mipt.ru и его поддомены. Полный обход сайта не выполняется.
+        </p>
+      </div>
+      <p id="import-field-error" class="field-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button type="submit" class="button button--primary" id="import-preview-submit">
+          <span class="button__label">Проверить страницу</span>
+          <span class="spinner" aria-hidden="true" hidden></span>
+        </button>
+        <span id="import-state" class="form-state" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+
+    <div id="import-result" class="import-result" hidden>
+      <h3 id="import-page-title"></h3>
+      <p id="import-page-excerpt" class="muted"></p>
+      <p id="import-empty" class="callout callout--info" hidden>Разрешённых документов не найдено.</p>
+      <ul id="import-links" class="import-links"></ul>
+      <p id="import-rejected-note" class="field__hint" hidden></p>
+      <div class="form-actions">
+        <button type="button" class="button button--primary" id="import-selected-submit" disabled>
+          Импортировать выбранные
+        </button>
+        <span id="import-selected-state" class="form-state" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+
+    <div id="import-job" class="job-panel" role="status" aria-live="polite" hidden>
+      <div class="job-panel__head">
+        <strong id="import-job-label">Задание импорта</strong>
+        <span id="import-job-status" class="badge status-queued">В очереди</span>
+      </div>
+      <p id="import-job-detail" class="muted"></p>
+    </div>
+  </section>
+</div>
+
+<section class="panel panel--documents" aria-labelledby="documents-title">
+  <div class="panel__header panel__header--row">
+    <div>
+      <h2 id="documents-title">Документы</h2>
+      <p class="muted">Состояние обработки, предупреждения и метаданные.</p>
+    </div>
+    <button type="button" class="button button--secondary" id="documents-refresh">Обновить список</button>
+  </div>
+
+  <div id="documents-error" class="callout callout--error" role="alert" hidden>
+    <h3>Не удалось загрузить список</h3>
+    <p id="documents-error-text"></p>
+    <button type="button" class="button button--secondary" id="documents-retry">Повторить</button>
+  </div>
+
+  <p id="documents-status" class="form-state" role="status" aria-live="polite"></p>
+  <p id="documents-empty" class="empty-state" hidden>Документов пока нет. Загрузите файл или импортируйте страницу.</p>
+  <p id="documents-loading" class="muted" role="status" aria-live="polite">Загрузка списка…</p>
+
+  <ul id="documents-list" class="document-list"></ul>
+
+  <details class="status-legend status-legend--documents">
+    <summary>Статусы обработки документов</summary>
+    <ul class="legend-list">
+      <li><span class="badge status-queued">В очереди</span><span>Задание ожидает обработки.</span></li>
+      <li><span class="badge status-processing">Обрабатывается</span><span>Идёт извлечение текста и подготовка.</span></li>
+      <li><span class="badge status-ready">Готов</span><span>Документ опубликован и доступен для поиска.</span></li>
+      <li><span class="badge status-needs_review">Требует проверки</span><span>Нужно подтвердить метаданные или качество.</span></li>
+      <li><span class="badge status-error">Ошибка</span><span>Обработка завершилась ошибкой; причина в предупреждениях.</span></li>
+    </ul>
+    <p class="field__hint">
+      HTML-представление DOCX/XLSX/HTML открывается из ссылок на цитаты на странице вопроса.
+      Для PDF доступен оригинал с нужной страницы.
+    </p>
+  </details>
+</section>
+
+<dialog id="metadata-dialog" class="dialog dialog--metadata" aria-labelledby="metadata-title">
+  <div class="dialog__header">
+    <div>
+      <p class="eyebrow">Метаданные</p>
+      <h2 id="metadata-title">Редактировать документ</h2>
+      <p id="metadata-doc-name" class="muted"></p>
+    </div>
+    <button type="button" class="icon-button" data-close-dialog aria-label="Закрыть">×</button>
+  </div>
+
+  <form id="metadata-form" class="stack-form" novalidate>
+    <input type="hidden" id="metadata-document-id">
+
+    <div class="field">
+      <label for="meta-title">Название</label>
+      <input type="text" id="meta-title" maxlength="500">
+    </div>
+
+    <div class="form-grid">
+      <div class="field">
+        <label for="meta-number">Номер</label>
+        <input type="text" id="meta-number" maxlength="200">
+      </div>
+      <div class="field">
+        <label for="meta-issued">Дата издания</label>
+        <input type="date" id="meta-issued">
+      </div>
+      <div class="field">
+        <label for="meta-valid-from">Действует с</label>
+        <input type="date" id="meta-valid-from">
+      </div>
+      <div class="field">
+        <label for="meta-valid-to">Действует по</label>
+        <input type="date" id="meta-valid-to">
+      </div>
+    </div>
+
+    <label class="checkbox">
+      <input type="checkbox" id="meta-reviewed">
+      <span>Проверено администратором</span>
+    </label>
+    <p class="field__hint">
+      Подтверждение проверки не заменяет публикацию: статус «Готов» назначает сервер
+      после успешной публикации.
+    </p>
+
+    <fieldset class="relations-fieldset">
+      <legend>Связи изменений</legend>
+      <p class="field__hint">
+        Автоматически предложенные связи не подтверждаются сами. Отметьте связь вручную,
+        только если проверили её по документу.
+      </p>
+      <div id="relations-list" class="relations-list"></div>
+      <button type="button" class="button button--ghost" id="add-relation">Добавить связь</button>
+    </fieldset>
+
+    <p id="metadata-error" class="field-error" role="alert" hidden></p>
+
+    <div class="dialog__actions">
+      <button type="button" class="button button--ghost" data-close-dialog>Отмена</button>
+      <button type="submit" class="button button--primary" id="metadata-submit">
+        <span class="button__label">Сохранить</span>
+        <span class="spinner" aria-hidden="true" hidden></span>
+      </button>
+    </div>
+  </form>
+</dialog>
+
+<template id="document-template">
+  <li class="document-card">
+    <div class="document-card__head">
+      <div class="document-card__identity">
+        <h3 class="document-card__title"></h3>
+        <p class="document-card__meta muted"></p>
+      </div>
+      <span class="badge document-card__status"></span>
+    </div>
+
+    <ul class="document-card__warnings plain-list" hidden></ul>
+
+    <dl class="document-card__details">
+      <div data-detail="number" hidden><dt>Номер</dt><dd></dd></div>
+      <div data-detail="issued" hidden><dt>Издан</dt><dd></dd></div>
+      <div data-detail="validity" hidden><dt>Действие</dt><dd></dd></div>
+      <div data-detail="reviewed" hidden><dt>Проверка</dt><dd></dd></div>
+      <div data-detail="relations" hidden><dt>Связи</dt><dd></dd></div>
+    </dl>
+
+    <p class="document-card__source muted" hidden></p>
+
+    <div class="document-card__actions">
+      <a class="button button--secondary document-card__original" target="_blank" rel="noopener">Оригинал</a>
+      <a class="button button--ghost document-card__presentation" target="_blank" rel="noopener" hidden>HTML-представление</a>
+      <button type="button" class="button button--primary document-card__metadata">Метаданные</button>
+    </div>
+  </li>
+</template>
+
+<template id="relation-template">
+  <div class="relation-row">
+    <label class="field field--compact">
+      <span>Целевой документ</span>
+      <input type="text" class="relation-target" maxlength="128" placeholder="ID документа">
+    </label>
+    <label class="field field--compact">
+      <span>Тип связи</span>
+      <select class="relation-kind">
+        <option value="amends">Изменяет</option>
+        <option value="repeals">Отменяет</option>
+        <option value="appendix">Приложение</option>
+      </select>
+    </label>
+    <label class="field field--compact">
+      <span>Раздел</span>
+      <input type="text" class="relation-section" maxlength="120" placeholder="Необязательно">
+    </label>
+    <label class="checkbox relation-confirmed-label">
+      <input type="checkbox" class="relation-confirmed">
+      <span>Подтверждена администратором</span>
+    </label>
+    <span class="relation-state field__hint"></span>
+    <button type="button" class="icon-button relation-remove" aria-label="Удалить связь">×</button>
+  </div>
+</template>
+
+<template id="import-link-template">
+  <li class="import-link">
+    <label class="checkbox import-link__label">
+      <input type="checkbox" class="import-checkbox">
+      <span class="import-link__text">
+        <strong class="import-link__title"></strong>
+        <span class="import-link__url muted"></span>
+      </span>
+    </label>
+    <span class="import-link__reason field__hint" hidden></span>
+  </li>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/documents.js" defer></script>
+{% endblock %}
