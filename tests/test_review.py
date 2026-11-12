@@ -117,6 +117,54 @@ def test_html_escape_blanks_notes_and_index(package):
     assert "pending" in index and f"{package.name}/index.html" in index
 
 
+@pytest.mark.parametrize("extension", ["docx", "xlsx"])
+def test_table_content_visible_once_and_search_context_available_separately(tmp_path, extension):
+    from bs4 import BeautifulSoup
+    source = tmp_path / ("synthetic." + extension)
+    labels = [f"ARTIFICIAL_UNIQUE_ROW_{i:03d}" for i in range(60)]
+    headers = ["Synthetic category", "Synthetic detail", "Synthetic amount"]
+    if extension == "docx":
+        from docx import Document
+        doc = Document()
+        table = doc.add_table(rows=1, cols=3)
+        for cell, text in zip(table.rows[0].cells, headers):
+            cell.text = text
+        for label in labels:
+            cells = table.add_row().cells
+            for cell, text in zip(cells, [label, "Artificial description " * 8, "0"]):
+                cell.text = text
+        doc.save(source)
+    else:
+        from openpyxl import Workbook
+        book = Workbook()
+        sheet = book.active
+        sheet.append(headers)
+        for label in labels:
+            sheet.append([label, "Artificial description " * 8, 0])
+        book.save(source)
+        book.close()
+    original_bytes = source.read_bytes()
+    info = prepare_document(source, tmp_path / "review")
+    package = Path(info["package_dir"])
+    soup = BeautifulSoup((package / "index.html").read_text(encoding="utf-8"), "html.parser")
+    main = soup.find("main", id="source-content")
+    assert len(main.find_all("table")) == 1
+    text = main.get_text()
+    assert all(text.count(label) == 1 for label in labels)
+    technical = soup.find("details", id="technical-units")
+    search = soup.find("details", id="search-fragments")
+    assert not technical.has_attr("open") and not search.has_attr("open")
+    assert not any(label in technical.get_text() for label in labels)
+    assert search.find("a", href="fragments.json")
+    fragments = json.loads((package / "fragments.json").read_text(encoding="utf-8"))
+    assert len(fragments) > 2
+    assert all(all(header in f["text"] for header in headers) for f in fragments)
+    record_decision(package, "approved", reviewer="Synthetic reviewer")
+    loaded = load_approved_package(package)
+    assert loaded["source_original"].read_bytes() == original_bytes
+    assert [f.model_dump(mode="json") for f in loaded["fragments"]] == fragments
+
+
 @pytest.mark.parametrize("decision", ["rejected", "excluded"])
 def test_negative_decisions(package, decision):
     record_decision(package, decision, reviewer="Synthetic reviewer", comment="Explicit test choice")

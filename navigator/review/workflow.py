@@ -93,8 +93,9 @@ def _table(rows):
 
 
 def _block(block):
-    label = _pre(json.dumps({k: v for k, v in block.items()
-                            if k not in ("text", "rows", "table")}, ensure_ascii=False))
+    label = ("<details class='block-details'><summary>Адрес и диагностика блока</summary>" +
+             _pre(json.dumps({k: v for k, v in block.items()
+                             if k not in ("text", "rows", "table")}, ensure_ascii=False)) + "</details>")
     if "sheet" in block and isinstance(block.get("rows"), list):
         # Sparse XLSX blocks: preserve blank positions between cells and rows.
         rows = block["rows"]
@@ -163,45 +164,54 @@ content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; ba
 <style>body{font:16px system-ui;margin:2rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}
 table{border-collapse:collapse}td{border:1px solid #888;padding:.4rem;min-width:2rem;white-space:pre-wrap}
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.pair img{width:100%}
-article{border-top:1px solid #888;margin-top:1rem}a{overflow-wrap:anywhere}</style>"""
+article{border-top:1px solid #888;margin-top:1rem}a{overflow-wrap:anywhere}
+details{margin:1rem 0}summary{cursor:pointer;font-weight:600}
+@media(max-width:800px){.pair{grid-template-columns:1fr}}</style>"""
 
 
 def _render(manifest, snapshot, fragments):
     body = ["<!doctype html><html lang='ru'><head>", _STYLE,
             "<title>Проверка распознавания</title></head><body>",
             "<h1>Проверка распознавания</h1>",
+            f'<h2>{_escape(manifest["source_name"])}</h2>',
             "<p>Решение хранится в review.json. Эта страница — снимок для проверки. "
             "Одобрение распознавания не подтверждает актуальность документа или metadata.reviewed.</p>",
             f'<a download href="{_escape(manifest["original"])}">Скачать оригинал</a>',
-            "<h2>Предупреждения и диагностика</h2>",
+            "<h2>Предупреждения</h2>",
             _pre(json.dumps(snapshot["warnings"], ensure_ascii=False, indent=2)),
+            "<details id='diagnostics'><summary>Техническая диагностика документа</summary>",
             _pre(json.dumps(snapshot.get("diagnostics", []), ensure_ascii=False, indent=2)),
-            _pre(json.dumps(manifest["diagnostics"], ensure_ascii=False, indent=2))]
+            _pre(json.dumps(manifest["diagnostics"], ensure_ascii=False, indent=2)), "</details>"]
     if snapshot["needs_review"]:
         body.append("<p>needs_review: одобрение запрещено.</p>")
+    body.append("<main id='source-content'>")
     if snapshot["media_type"] == "pdf":
         for page in manifest["diagnostics"]:
             body += [f'<article><h2>Страница {_escape(page.get("page", "?"))}</h2>',
-                     _pre(json.dumps(page, ensure_ascii=False)), '<div class="pair"><div>']
+                     '<div class="pair"><div>']
             if page.get("preview"):
                 body.append(f'<img alt="Оригинальная страница" src="{_escape(page["preview"])}">')
             body.append("</div><div>")
-            body.extend(_pre(json.dumps(d, ensure_ascii=False))
-                        for d in snapshot.get("diagnostics", []) if d.get("page") == page.get("page"))
             body.extend(_block(b) for b in snapshot["blocks"] if b.get("page") == page.get("page"))
             body.append("</div></div></article>")
     else:
-        body.append("<h2>Структурные блоки</h2>")
+        body.append("<h2>Распознанное содержание</h2>")
         body.extend("<article>" + _block(b) + "</article>" for b in snapshot["blocks"])
-    body.append("<h2>Извлечённые единицы, включая сноски</h2>")
-    for unit in snapshot["units"]:
-        body += [_pre(json.dumps({k: v for k, v in unit.items() if k != "text"}, ensure_ascii=False)),
-                 _pre(unit["text"])]
-    body.append("<h2>Итоговые фрагменты и локаторы</h2>")
+    body.append("</main><details id='technical-units'><summary>Техническая структура извлечения</summary>"
+                "<p><a href='snapshot.json' download>Скачать полный снимок извлечения (JSON)</a></p>")
+    for index, unit in enumerate(snapshot["units"]):
+        metadata = {k: v for k, v in unit.items()
+                    if k not in ("text", "rows", "row_locators", "table_header")}
+        metadata.update(index=index, text_chars=len(unit["text"]), rows_count=len(unit.get("rows") or []))
+        body.append(_pre(json.dumps(metadata, ensure_ascii=False)))
+    body.append("</details><details id='search-fragments'><summary>Фрагменты для поиска и их локаторы</summary>"
+                "<p>Это отдельное представление для RAG. Шапки таблиц и контекст могут повторяться "
+                "в разных фрагментах, чтобы каждый сохранял смысл.</p>"
+                "<p><a href='fragments.json' download>Скачать фрагменты (JSON)</a></p>")
     for f in fragments:
         body += ["<article>", _pre(f['id'] + " " + json.dumps(f["locator"], ensure_ascii=False)),
                  _pre(f["text"]), "</article>"]
-    return "".join(body) + "</body></html>"
+    return "".join(body) + "</details></body></html>"
 
 
 def prepare_document(source: Path, out_root: Path, *, parsed: Parsed | None = None,
