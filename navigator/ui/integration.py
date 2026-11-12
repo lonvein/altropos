@@ -129,7 +129,9 @@ def synthetic_allowed(settings: Settings, explicit: bool | None = None) -> bool:
     if explicit is not None:
         return explicit
     raw = os.getenv("UI_SYNTHETIC_FALLBACK")
-    if raw is not None:
+    # Compose may pass an empty string for an unset variable. Treat it as
+    # "not configured" so the development default still applies.
+    if raw is not None and raw.strip():
         return raw.strip().lower() in {"1", "true", "yes", "on", "force"}
     return settings.profile == "development"
 

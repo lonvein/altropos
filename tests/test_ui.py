@@ -279,6 +279,18 @@ def test_production_without_routers_does_not_mount_stubs() -> None:
         assert any("недоступен" in reason for reason in health["reasons"])
 
 
+def test_empty_synthetic_env_is_treated_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from navigator.config import Settings
+    from navigator.ui.integration import synthetic_allowed
+
+    monkeypatch.setenv("UI_SYNTHETIC_FALLBACK", "")
+    assert synthetic_allowed(Settings(profile="development")) is True
+    assert synthetic_allowed(Settings(profile="a100")) is False
+
+    monkeypatch.setenv("UI_SYNTHETIC_FALLBACK", "false")
+    assert synthetic_allowed(Settings(profile="development")) is False
+
+
 def test_explicit_real_routers_are_used() -> None:
     ask_router = APIRouter()
 
