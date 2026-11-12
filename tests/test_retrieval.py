@@ -226,6 +226,38 @@ def test_revision_dates_and_confirmed_repeal(tmp_path):
     assert len(search(store).hits) == 2
 
 
+@pytest.mark.parametrize("section", [None, "1"])
+@pytest.mark.parametrize("as_of,active", [("2026-09-30", False), ("2026-10-01", True),
+                                         ("2026-11-12", True)])
+def test_expired_repealer_never_revives_target(tmp_path, section, as_of, active):
+    store = Store(tmp_path)
+    old, fragments = document(store, "old", texts=["ИСКУССТВЕННЫЙ ПРИМЕР. заявка один",
+                                                   "ИСКУССТВЕННЫЙ ПРИМЕР. заявка два"])
+    Indexer(store, settings()).index_document(old.id, fragments)
+    repealer, repealer_fragments = document(store, "repealer", metadata={
+        "reviewed": True, "valid_from": "2026-10-01", "valid_to": "2026-10-31",
+        "relations": [{"kind": "repeals", "target_id": "old", "target_section": section,
+                       "confirmed": True}]})
+    Indexer(store, settings()).index_document(repealer.id, repealer_fragments)
+    result = asyncio.run(Searcher(store, settings()).search(SearchRequest(question="заявка", as_of=as_of)))
+    ids = {hit.fragment.id for hit in result.hits}
+    assert (fragments[0].id in ids) is (not active)
+    assert (fragments[1].id in ids) is (not active or section is not None)
+    assert (repealer_fragments[0].id in ids) is (as_of == "2026-10-01")
+
+
+def test_repeal_with_unknown_effective_date_only_warns(tmp_path):
+    store = Store(tmp_path)
+    for doc_id, metadata in [("old", {}), ("repealer", {
+        "reviewed": True, "issued": "2026-01-01", "valid_to": "2026-10-31",
+        "relations": [{"kind": "repeals", "target_id": "old", "confirmed": True}]})]:
+        doc, fragments = document(store, doc_id, metadata=metadata)
+        Indexer(store, settings()).index_document(doc.id, fragments)
+    result = search(store)
+    assert [hit.fragment.document_id for hit in result.hits] == ["old"]
+    assert "Дата вступления отмены в силу не подтверждена." in result.warnings
+
+
 def test_rrf_duplicates_and_limits(tmp_path):
     assert rrf([["a", "b", "a"], ["b"]]) == {"a": 1 / 61, "b": 1 / 62 + 1 / 61}
     store, config = Store(tmp_path), settings(True, top_fragments=4)
