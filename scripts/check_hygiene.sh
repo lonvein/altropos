@@ -31,7 +31,7 @@ else
 fi
 
 echo "== internal paths =="
-if git grep -nIE '/home/[^ ]+|/Users/[^ ]+|C:\\\\Users\\\\' -- . ':!docs/security.md'; then
+if git grep -nIE '/(home|Users)/[A-Za-z0-9._-]+/|C:\\\\Users\\\\[A-Za-z0-9._-]+' -- . ':!docs/security.md'; then
   echo "FAIL: absolute personal path" >&2
   fail=1
 else

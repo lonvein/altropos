@@ -91,8 +91,7 @@ Hugging Face. Это подтверждает **корректность lock-ф
 
 ```bash
 PROFILE=development LLM_ENABLED=false ML_ENABLED=false \
-DATA_DIR=/home/linuxoid/tmp/opencode/altropos-smoke \
-UI_SYNTHETIC_FALLBACK=true \
+DATA_DIR="$(mktemp -d)" UI_SYNTHETIC_FALLBACK=true \
 .venv/bin/python -m uvicorn navigator.main:app --host 127.0.0.1 --port 8010
 ```
 
