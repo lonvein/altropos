@@ -129,6 +129,55 @@ def test_upload_wait_ask_open_source(client: TestClient) -> None:
     assert original.content.startswith(b"%PDF")
 
 
+def test_upload_statuses_and_duplicate(client: TestClient) -> None:
+    ready = client.post(
+        "/api/documents",
+        files={"file": ("ready-demo.pdf", b"%PDF-1.4\n% ready demo\n", "application/pdf")},
+    ).json()
+    first = client.get(f"/api/jobs/{ready['job_id']}").json()
+    assert first["status"] == "queued"
+    time.sleep(0.2)
+    second = client.get(f"/api/jobs/{ready['job_id']}").json()
+    assert second["status"] == "processing"
+    finished = wait_for_job(client, ready["job_id"])
+    assert finished["status"] == "ready"
+
+    review = client.post(
+        "/api/documents",
+        files={"file": ("review-me.pdf", b"%PDF-1.4\n% review demo\n", "application/pdf")},
+    ).json()
+    review_finished = wait_for_job(client, review["job_id"])
+    assert review_finished["status"] == "needs_review"
+    listed = {item["id"]: item for item in client.get("/api/documents").json()["documents"]}
+    assert listed[review["document_id"]]["status"] == "needs_review"
+
+    failed = client.post(
+        "/api/documents",
+        files={"file": ("error-demo.pdf", b"%PDF-1.4\n% error demo\n", "application/pdf")},
+    ).json()
+    failed_finished = wait_for_job(client, failed["job_id"])
+    assert failed_finished["status"] == "error"
+    assert failed_finished["error"]
+
+    duplicate = client.post(
+        "/api/documents",
+        files={"file": ("ready-demo.pdf", b"%PDF-1.4\n% ready demo\n", "application/pdf")},
+    ).json()
+    assert duplicate["duplicate"] is True
+    assert duplicate["document_id"] == ready["document_id"]
+    assert len(client.get("/api/documents").json()["documents"]) >= 4
+
+
+def test_source_reload_keeps_fragment(client: TestClient) -> None:
+    answer = client.post("/api/ask", json={"question": "Как направить заявку?"}).json()
+    source_url = answer["sources"][0]["url"]
+    first = client.get(source_url)
+    second = client.get(source_url)
+    assert first.status_code == second.status_code == 200
+    assert "ДЕМО-ПРЕДСТАВЛЕНИЕ" in first.text
+    assert first.text == second.text
+
+
 def test_metadata_patch_and_manual_relations(client: TestClient) -> None:
     upload = client.post(
         "/api/documents",
