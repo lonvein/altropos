@@ -249,7 +249,13 @@ class LLMClient:
                                   "Ответь на вопрос по предоставленным фрагментам с учётом as_of. "
                                   "Каждое утверждение и шаг снабди ID и дословной цитатой. "
                                   "Учитывай условия, исключения, неполноту и конфликты; не придумывай источники.")
-        self._evidence(result, request.fragments)
+        try:
+            self._evidence(result, request.fragments)
+        except ComponentError as exc:
+            # Internal orchestration context only; never part of ErrorDetail/HTTP.
+            # Preserve valid structure so repair can address the actual bad draft.
+            exc.draft = result.model_copy(deep=True)
+            raise
         return result
 
     async def verify(self, request: VerificationRequest) -> Verification:

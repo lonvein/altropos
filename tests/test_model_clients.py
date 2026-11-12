@@ -228,6 +228,38 @@ async def test_bad_llm_output(endpoint, settings, fragment, defect):
     with pytest.raises(ComponentError) as exc:
         await LLMClient(settings).generate(GenerationRequest(question="Вопрос?", fragments=[fragment]))
     assert_code(exc, "invalid_model_output")
+    if defect in ("quote", "id"):
+        assert exc.value.draft == Draft.model_validate(content)
+    else:
+        assert not hasattr(exc.value, "draft")
+
+
+@pytest.mark.parametrize("defect", ["quote", "id"])
+async def test_invalid_evidence_preserves_private_deep_copy(settings, fragment, monkeypatch, defect):
+    from navigator.schemas import ErrorResponse
+
+    draft = Draft(status="partial", summary=[{"text": "ИСКУССТВЕННЫЙ вывод", "evidence": [
+        {"fragment_id": "foreign" if defect == "id" else fragment.id,
+         "quote": "Заявка подаётся координатору." if defect == "id" else "ИСКУССТВЕННАЯ ошибка"}]}])
+    client = LLMClient(settings)
+
+    async def call(*args):
+        return draft
+
+    monkeypatch.setattr(client, "_call", call)
+    with pytest.raises(ComponentError) as exc:
+        await client.generate(GenerationRequest(question="Вопрос?", fragments=[fragment]))
+    error = exc.value
+    assert_code(exc, "invalid_model_output")
+    saved = error.draft
+    assert saved == draft and saved is not draft
+    draft.summary[0].evidence[0].quote = "Изменено после ошибки"
+    assert saved.summary[0].evidence[0].quote != draft.summary[0].evidence[0].quote
+    assert ErrorResponse(error=error.detail).model_dump() == {"error": {
+        "code": "invalid_model_output",
+        "message": "LLM указала неизвестный фрагмент или неточную цитату.",
+        "retryable": False}}
+    assert "ИСКУССТВЕНН" not in str(error)
 
 
 @pytest.mark.parametrize("stage", ["sources", "prompt", "fragments"])
