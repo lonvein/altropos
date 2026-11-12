@@ -3,6 +3,7 @@ import json
 import sqlite3
 from contextlib import nullcontext
 from datetime import date
+from math import ceil
 from time import perf_counter
 
 from pydantic import ValidationError
@@ -107,14 +108,16 @@ class AnswerPipeline:
         if self.llm is None or not self.settings.llm_enabled:
             return fallback("LLM отключена; приведены только источники без выводов и проверки полноты.")
 
-        # UTF-8 bytes are a conservative admission estimate, not a token count.
+        # ceil(UTF-8 bytes / 3) is only a rough token estimate for admission;
+        # it is not a token count or a guarantee that the materials fit.
         # The concrete client checks its real tokenizer for every model call.
         selected = []
         for fragment in fragments[:self.settings.top_fragments]:
             candidate = selected + [fragment]
             size = len(json.dumps([f.model_dump(mode="json") for f in candidate],
                                   ensure_ascii=False).encode("utf-8"))
-            if size <= self.settings.context_budget:
+            estimated_tokens = ceil(size / 3)
+            if estimated_tokens <= self.settings.context_budget:
                 selected = candidate
         limited = rejected or len(selected) < len(fragments)
         if limited:

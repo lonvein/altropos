@@ -1,6 +1,7 @@
 """Only artificial documents and scripted models; no network or GPU."""
 import asyncio
 import hashlib
+import json
 from contextlib import asynccontextmanager
 from datetime import date
 
@@ -79,7 +80,7 @@ class Model:
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, request):
     store = Store(tmp_path)
     document = Document(id="artificial-doc", version="v1", name="artificial.pdf",
                         title="Artificial server title", sha256="1" * 64,
@@ -87,7 +88,8 @@ def setup(tmp_path):
     store.register_document(document)
     fragment = Fragment(id="artificial-fragment", document_id=document.id,
                         document_version="v1", ordinal=0,
-                        text="ARTIFICIAL. Submit the application to the coordinator.",
+                        text=getattr(request, "param",
+                                     "ARTIFICIAL. Submit the application to the coordinator."),
                         locator={"kind": "pdf", "page": 1})
     artifact = tmp_path / "indexes" / "artificial-publication" / "fixture.json"
     artifact.parent.mkdir(parents=True)
@@ -338,3 +340,24 @@ def test_corrupt_pinned_publication_is_unavailable(setup):
     setup[0].execute("UPDATE publications SET fragments='[]'")
     response = ask(setup)
     assert response.status == "unavailable" and not response.sources
+
+
+@pytest.mark.parametrize("setup", [
+    "ИСКУССТВЕННЫЙ ПРИМЕР. Заявление передаётся координатору учебного события. " * 20,
+], indirect=True)
+def test_russian_fragment_not_rejected_by_byte_count(setup):
+    # A normal Russian passage of roughly 500 tokens; no actual tokenizer is
+    # loaded here and the estimate does not promise an exact token count.
+    fragment = setup[3]
+    serialized_bytes = len(json.dumps([fragment.model_dump(mode="json")],
+                                     ensure_ascii=False).encode("utf-8"))
+    assert serialized_bytes > setup[1].context_budget
+    draft = Draft(status="answered", summary=[Claim(
+        text="Заявление передаётся координатору учебного события.",
+        evidence=[Evidence(fragment_id=fragment.id,
+                           quote="Заявление передаётся координатору учебного события.")])])
+    model = Model([draft], [Verification(supported=True, complete=True)])
+    response = ask(setup, model)
+    assert response.status == "answered" and response.answer_mode == "generated"
+    assert kinds(model) == ["generate", "verify"]
+    assert model.calls[1][1].fragments == [fragment]
