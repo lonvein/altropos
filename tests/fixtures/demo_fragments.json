@@ -1,0 +1,150 @@
+{
+  "synthetic": true,
+  "documents": [
+    {
+      "id": "demo-d1-v1",
+      "version": "v1",
+      "name": "demo-1.pdf",
+      "title": "Искусственный учебный документ 1",
+      "sha256": "bc72862b03360805bf10c90c64043fa5e7b4556f043a57359cabb422de8fe720",
+      "original_path": "originals/demo-1.pdf",
+      "media_type": "pdf",
+      "status": "queued",
+      "source_url": null,
+      "retrieved_at": null,
+      "metadata": {
+        "title": null,
+        "number": null,
+        "issued": null,
+        "valid_from": null,
+        "valid_to": null,
+        "reviewed": null,
+        "relations": null
+      },
+      "warnings": []
+    },
+    {
+      "id": "demo-d2-v1",
+      "version": "v1",
+      "name": "demo-2.docx",
+      "title": "Искусственный учебный документ 2",
+      "sha256": "41518a0aaabaa16c17fcc1e1351d5e3d8fd5beca4c8094c73857308521eed462",
+      "original_path": "originals/demo-2.docx",
+      "media_type": "docx",
+      "status": "queued",
+      "source_url": null,
+      "retrieved_at": null,
+      "metadata": {
+        "title": null,
+        "number": null,
+        "issued": null,
+        "valid_from": null,
+        "valid_to": null,
+        "reviewed": null,
+        "relations": null
+      },
+      "warnings": []
+    },
+    {
+      "id": "demo-d3-v1",
+      "version": "v1",
+      "name": "demo-3.xlsx",
+      "title": "Искусственный учебный документ 3",
+      "sha256": "aae45dc35ba318e2df0d02b7df0493fc767013af8cfe1bf2f8b3f63779b49f81",
+      "original_path": "originals/demo-3.xlsx",
+      "media_type": "xlsx",
+      "status": "queued",
+      "source_url": null,
+      "retrieved_at": null,
+      "metadata": {
+        "title": null,
+        "number": null,
+        "issued": null,
+        "valid_from": null,
+        "valid_to": null,
+        "reviewed": null,
+        "relations": null
+      },
+      "warnings": []
+    },
+    {
+      "id": "demo-d4-v1",
+      "version": "v1",
+      "name": "demo-4.html",
+      "title": "Искусственный учебный документ 4",
+      "sha256": "c2247befaf10fc0e729dc9fa3772f230472d73d7bbfe547a000f9f593d1ad579",
+      "original_path": "originals/demo-4.html",
+      "media_type": "html",
+      "status": "queued",
+      "source_url": null,
+      "retrieved_at": null,
+      "metadata": {
+        "title": null,
+        "number": null,
+        "issued": null,
+        "valid_from": null,
+        "valid_to": null,
+        "reviewed": null,
+        "relations": null
+      },
+      "warnings": []
+    }
+  ],
+  "fragments": [
+    {
+      "id": "demo-f1-v1",
+      "document_id": "demo-d1-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Заявка направляется координатору до начала учебного события.",
+      "section": "1",
+      "locator": {
+        "kind": "pdf",
+        "page": 2,
+        "bbox": [
+          0.0,
+          0.0,
+          100.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "demo-f2-v1",
+      "document_id": "demo-d2-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Координатор отвечает в течение двух учебных дней.",
+      "section": "1",
+      "locator": {
+        "kind": "docx",
+        "block": 0
+      }
+    },
+    {
+      "id": "demo-f3-v1",
+      "document_id": "demo-d3-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория: демонстрационная. Лимит: 10 условных единиц.",
+      "section": "1",
+      "locator": {
+        "kind": "xlsx",
+        "sheet": "Демо",
+        "range": "A1:B2"
+      }
+    },
+    {
+      "id": "demo-f4-v1",
+      "document_id": "demo-d4-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Для учебного события требуется подтверждение координатора.",
+      "section": "1",
+      "locator": {
+        "kind": "html",
+        "block": 0
+      }
+    }
+  ]
+}
