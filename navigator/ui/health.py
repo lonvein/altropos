@@ -14,7 +14,7 @@ log = logging.getLogger("navigator.ui.health")
 async def _probe(url: str, timeout: float = 1.5) -> dict[str, Any]:
     """Best-effort reachability probe; a missing service must not break the UI."""
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
             response = await client.get(url, headers={"Accept": "application/json"})
     except httpx.TimeoutException:
         return {"status": "unavailable", "reason": "Сервис не ответил за отведённое время."}
