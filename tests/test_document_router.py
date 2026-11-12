@@ -61,6 +61,9 @@ def test_upload_worker_ready_source_patch_and_download(service):
         assert original.headers['content-disposition'].startswith('attachment')
         assert 'original_path' not in client.get('/api/documents').text
         assert 'payload' not in client.get('/api/jobs').text
+        # Injected services and the lazy ask pipeline must share one Store.
+        answer = client.post('/api/ask', json={'question': 'ИСКУССТВЕННЫЙ ПРИМЕР'}).json()
+        assert any(s['fragment_id'] == fragments[0].id for s in answer['sources'])
         service.store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (data['document_id'],))
         assert client.get(f'/api/sources/{fragments[0].id}').status_code == 404
 

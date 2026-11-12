@@ -1,0 +1,2 @@
+# Complete application runtime; model inference has a separate environment.
+-r requirements-app.txt

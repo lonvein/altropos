@@ -267,7 +267,10 @@ def test_source_escapes_metadata_title(client: TestClient) -> None:
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in source.text
 
 
-def test_production_without_routers_does_not_mount_stubs() -> None:
+def test_production_without_routers_does_not_mount_stubs(monkeypatch) -> None:
+    from navigator.ui.integration import RouterResolution
+    monkeypatch.setattr("navigator.main.load_feature_router",
+                        lambda key: RouterResolution(key=key, reason="Router отсутствует в этом тесте."))
     app = create_app(synthetic_fallback=False)
     with TestClient(app) as client:
         assert app.state.integration["data_mode"] == "unavailable"

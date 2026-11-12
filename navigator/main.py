@@ -98,7 +98,7 @@ def create_app(
     synthetic_fallback: bool | None = None,
     document_service: Any | None = None,
 ) -> FastAPI:
-    settings = get_settings()
+    settings = document_service.settings if document_service is not None else get_settings()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -136,6 +136,8 @@ def create_app(
         version="0.1.0",
     )
     app.state.settings = settings
+    if document_service is not None:
+        app.state.store = document_service.store
     app.state.health_cache = None
 
     # No development-profile implicit fallback. Environment is an explicit opt-in.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -134,7 +135,14 @@ def test_deployment_scripts_are_present_and_executable():
     ):
         path = ROOT / "scripts" / name
         assert path.is_file(), name
-        assert path.stat().st_mode & stat.S_IXUSR, f"{name} must be executable"
+        if os.name == "nt":
+            # Windows has no Unix executable bit; Git must preserve it for Linux.
+            entry = subprocess.check_output(
+                ["git", "ls-files", "--stage", "--", f"scripts/{name}"], cwd=ROOT, text=True,
+            )
+            assert entry.startswith("100755 "), f"{name} must retain its Git executable bit"
+        else:
+            assert path.stat().st_mode & stat.S_IXUSR, f"{name} must be executable"
 
 
 def test_backup_and_restore_cover_a_single_runtime_snapshot():

@@ -137,6 +137,10 @@ class DocumentService:
                 saved = Document.model_validate_json(previous["payload"]).metadata
                 meta = MetadataPatch.model_validate({**meta.model_dump(), **saved.model_dump(exclude_none=True)})
             title = (meta.title or parsed.title or Path(filename).stem)[:500]
+            if title == Path(rel_path).stem:
+                # Parsers see an internal storage ID, not the uploaded filename.
+                title = Path(filename).stem[:500]
+                meta = meta.model_copy(update={"title": title})
 
             # Формируем обновленный документ
             requires_review = parsed.needs_review or not fragments
