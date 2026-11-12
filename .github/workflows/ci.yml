@@ -71,7 +71,7 @@ jobs:
             sleep 2
           done
           cat /tmp/health.json
-          python - <<'PY'
+          python3 - <<'PY'
           import json
 
           with open("/tmp/health.json", encoding="utf-8") as stream:
