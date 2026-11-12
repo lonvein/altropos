@@ -1,0 +1,10 @@
+# Application runtime (deployment-owned file).
+# Keep the pydantic pins identical to requirements-contracts.txt; Klim owns the
+# shared dependency set and should confirm upgrades before a release.
+fastapi==0.162.5
+uvicorn==0.54.0
+jinja2==3.1.6
+httpx==0.28.1
+python-multipart==0.0.33
+pydantic==2.11.4
+pydantic-settings==2.9.1

@@ -1,0 +1,638 @@
+{
+  "synthetic": true,
+  "notice": "ИСКУССТВЕННЫЙ КОРПУС. Документы и факты придуманы для проверки набора вопросов, интерфейса и метрик. Не являются регламентами МФТИ и не содержат внутренних данных.",
+  "documents": [
+    {
+      "id": "syn-org-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Порядок организации учебных мероприятий",
+      "media_type": "pdf",
+      "edition": "ред. 2025-09-01",
+      "issued": "2025-09-01",
+      "valid_from": "2025-09-01",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-org-amend-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Изменение № 1 к Порядку организации учебных мероприятий",
+      "media_type": "pdf",
+      "edition": "изменение от 2026-02-01",
+      "issued": "2026-02-01",
+      "valid_from": "2026-03-01",
+      "valid_to": null,
+      "relations": [
+        {
+          "target_id": "syn-org-v1",
+          "kind": "amends",
+          "confirmed": true
+        }
+      ],
+      "synthetic": true
+    },
+    {
+      "id": "syn-memo-org-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Памятка координатору учебных мероприятий",
+      "media_type": "pdf",
+      "edition": "памятка от 2026-04-01",
+      "issued": "2026-04-01",
+      "valid_from": "2026-04-01",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-stipend-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Положение о повышенной государственной стипендии",
+      "media_type": "docx",
+      "edition": "ред. 2025-10-01",
+      "issued": "2025-10-01",
+      "valid_from": "2025-10-01",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-requests-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Регламент обработки заявок",
+      "media_type": "xlsx",
+      "edition": "ред. 2025-11-01",
+      "issued": "2025-11-01",
+      "valid_from": "2025-11-01",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-pass-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Инструкция по пропускному режиму (скан)",
+      "media_type": "pdf",
+      "edition": "скан, ред. 2025-08-15",
+      "issued": "2025-08-15",
+      "valid_from": "2025-08-15",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-leave-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Порядок предоставления академического отпуска",
+      "media_type": "pdf",
+      "edition": "ред. 2025-09-15",
+      "issued": "2025-09-15",
+      "valid_from": "2025-09-15",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-limits-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Таблица лимитов и сроков",
+      "media_type": "xlsx",
+      "edition": "ред. 2026-01-10",
+      "issued": "2026-01-10",
+      "valid_from": "2026-01-10",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-trip-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Положение о служебных командировках",
+      "media_type": "docx",
+      "edition": "ред. 2025-01-15",
+      "issued": "2025-01-15",
+      "valid_from": "2025-01-15",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    },
+    {
+      "id": "syn-trip-amend-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Изменение № 1 к Положению о служебных командировках",
+      "media_type": "docx",
+      "edition": "изменение от 2026-06-01",
+      "issued": "2026-06-01",
+      "valid_from": "2026-07-01",
+      "valid_to": null,
+      "relations": [
+        {
+          "target_id": "syn-trip-v1",
+          "kind": "amends",
+          "confirmed": true
+        }
+      ],
+      "synthetic": true
+    },
+    {
+      "id": "syn-memo-trip-v1",
+      "version": "v1",
+      "title": "ИСКУССТВЕННЫЙ ПРИМЕР. Памятка бухгалтерии о командировках",
+      "media_type": "docx",
+      "edition": "памятка от 2026-08-01",
+      "issued": "2026-08-01",
+      "valid_from": "2026-08-01",
+      "valid_to": null,
+      "relations": [],
+      "synthetic": true
+    }
+  ],
+  "fragments": [
+    {
+      "id": "syn-org-1-1-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Заявка на учебное мероприятие подаётся координатору не позднее чем за 10 рабочих дней до даты события.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [72.0, 120.0, 520.0, 160.0]}
+    },
+    {
+      "id": "syn-org-1-2-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "1.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Учебный офис согласует заявку в течение 3 рабочих дней.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [72.0, 170.0, 520.0, 205.0]}
+    },
+    {
+      "id": "syn-org-2-1-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "2.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. После согласования координатор резервирует аудиторию и оборудование.",
+      "locator": {"kind": "pdf", "page": 3, "bbox": [72.0, 100.0, 520.0, 135.0]}
+    },
+    {
+      "id": "syn-org-2-2-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "2.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Для мероприятий с числом участников более 50 требуется письменное подтверждение декана факультета.",
+      "locator": {"kind": "pdf", "page": 3, "bbox": [72.0, 145.0, 520.0, 185.0]}
+    },
+    {
+      "id": "syn-org-3-1-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "3.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Финансирование учебного мероприятия осуществляется по статье «учебные мероприятия» в пределах 50 000 условных единиц на одно событие.",
+      "locator": {"kind": "pdf", "page": 4, "bbox": [72.0, 100.0, 520.0, 145.0]}
+    },
+    {
+      "id": "syn-org-3-2-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 5,
+      "section": "3.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Авансовый отчёт по мероприятию представляется в течение 5 рабочих дней после его окончания.",
+      "locator": {"kind": "pdf", "page": 4, "bbox": [72.0, 155.0, 520.0, 195.0]}
+    },
+    {
+      "id": "syn-org-4-1-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 6,
+      "section": "4.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Отмена мероприятия оформляется письменно не позднее чем за 2 рабочих дня до даты события.",
+      "locator": {"kind": "pdf", "page": 5, "bbox": [72.0, 100.0, 520.0, 140.0]}
+    },
+    {
+      "id": "syn-org-5-1-v1",
+      "document_id": "syn-org-v1",
+      "document_version": "v1",
+      "ordinal": 7,
+      "section": "5.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Изменения в Порядок вносятся приказом; новая редакция действует с указанной в приказе даты.",
+      "locator": {"kind": "pdf", "page": 5, "bbox": [72.0, 150.0, 520.0, 190.0]}
+    },
+    {
+      "id": "syn-org-am-1-v1",
+      "document_id": "syn-org-amend-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Изменение вступает в силу с 1 марта 2026 года. Пункт 1.1 изложить в редакции: заявка подаётся не позднее чем за 15 рабочих дней до даты события.",
+      "locator": {"kind": "pdf", "page": 1, "bbox": [72.0, 120.0, 520.0, 175.0]}
+    },
+    {
+      "id": "syn-org-am-2-v1",
+      "document_id": "syn-org-amend-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Пункт 2.2 изложить в редакции: подтверждение декана требуется для мероприятий с числом участников более 30.",
+      "locator": {"kind": "pdf", "page": 1, "bbox": [72.0, 185.0, 520.0, 225.0]}
+    },
+    {
+      "id": "syn-org-am-3-v1",
+      "document_id": "syn-org-amend-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "3",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Дополнить пунктом 3.3: при отмене менее чем за 1 рабочий день координатор прилагает письменное обоснование.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [72.0, 100.0, 520.0, 140.0]}
+    },
+    {
+      "id": "syn-memo-org-1-v1",
+      "document_id": "syn-memo-org-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Памятка координатору: подтверждение декана запрашивается для мероприятий с числом участников более 40.",
+      "locator": {"kind": "pdf", "page": 1, "bbox": [72.0, 100.0, 520.0, 140.0]}
+    },
+    {
+      "id": "syn-stip-1-1-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Право на повышенную государственную стипендию имеют студенты 2–4 курсов, обучающиеся за счёт средств бюджета.",
+      "locator": {"kind": "docx", "block": 0}
+    },
+    {
+      "id": "syn-stip-2-1-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "2.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Повышенная стипендия за учебные достижения назначается при наличии не менее двух подряд сессий, сданных на «отлично».",
+      "locator": {"kind": "docx", "block": 1}
+    },
+    {
+      "id": "syn-stip-2-2-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "2.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Достижением в научной деятельности считается публикация или доклад на научной конференции.",
+      "locator": {"kind": "docx", "block": 2}
+    },
+    {
+      "id": "syn-stip-3-1-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "3.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Размер повышенной стипендии составляет 10 000 условных единиц в месяц.",
+      "locator": {"kind": "docx", "block": 3}
+    },
+    {
+      "id": "syn-stip-3-2-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "3.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Выплата начинается с месяца, следующего за месяцем заседания комиссии.",
+      "locator": {"kind": "docx", "block": 4}
+    },
+    {
+      "id": "syn-stip-4-1-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 5,
+      "section": "4.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Заявление и портфолио подаются до 15 сентября и до 15 февраля.",
+      "locator": {"kind": "docx", "block": 5}
+    },
+    {
+      "id": "syn-stip-4-2-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 6,
+      "section": "4.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Комиссия рассматривает материалы в течение 10 рабочих дней.",
+      "locator": {"kind": "docx", "block": 6}
+    },
+    {
+      "id": "syn-stip-5-1-v1",
+      "document_id": "syn-stipend-v1",
+      "document_version": "v1",
+      "ordinal": 7,
+      "section": "5.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. При появлении академической задолженности выплата повышенной стипендии прекращается.",
+      "locator": {"kind": "docx", "block": 7}
+    },
+    {
+      "id": "syn-req-1-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "Сроки",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Тип заявки: учебная. Срок обработки: 3 рабочих дня. Ответственный: координатор. Эскалация: 5 рабочих дней.",
+      "locator": {"kind": "xlsx", "sheet": "Сроки", "range": "A2:D2"}
+    },
+    {
+      "id": "syn-req-2-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "Сроки",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Тип заявки: финансовая. Срок обработки: 7 рабочих дней. Ответственный: бухгалтерия. Эскалация: 10 рабочих дней.",
+      "locator": {"kind": "xlsx", "sheet": "Сроки", "range": "A3:D3"}
+    },
+    {
+      "id": "syn-req-3-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "Сроки",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Тип заявки: командировочная. Срок обработки: 10 рабочих дней. Ответственный: отдел кадров. Эскалация: 15 рабочих дней.",
+      "locator": {"kind": "xlsx", "sheet": "Сроки", "range": "A4:D4"}
+    },
+    {
+      "id": "syn-req-4-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "Сроки",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Тип заявки: ИТ. Срок обработки: 2 рабочих дня. Ответственный: ИТ-отдел. Эскалация: 4 рабочих дня.",
+      "locator": {"kind": "xlsx", "sheet": "Сроки", "range": "A5:D5"}
+    },
+    {
+      "id": "syn-req-5-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория: оборудование. Лимит: 100 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A2:B2"}
+    },
+    {
+      "id": "syn-req-6-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 5,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория: расходники. Лимит: 30 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A3:B3"}
+    },
+    {
+      "id": "syn-req-7-v1",
+      "document_id": "syn-requests-v1",
+      "document_version": "v1",
+      "ordinal": 6,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория: программное обеспечение. Лимит: 80 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A4:B4"}
+    },
+    {
+      "id": "syn-pass-1-1-v1",
+      "document_id": "syn-pass-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Пропуск оформляется за 1 рабочий день до планируемого посещения.",
+      "locator": {"kind": "pdf", "page": 1, "bbox": [70.0, 130.0, 520.0, 165.0]}
+    },
+    {
+      "id": "syn-pass-1-2-v1",
+      "document_id": "syn-pass-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "1.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Для оформления гостевого пропуска требуется паспорт.",
+      "locator": {"kind": "pdf", "page": 1, "bbox": [70.0, 175.0, 520.0, 205.0]}
+    },
+    {
+      "id": "syn-pass-2-1-v1",
+      "document_id": "syn-pass-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "2.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Вход по разовому пропуску разрешён с 08:00 до 20:00.",
+      "locator": {"kind": "pdf", "page": 1, "bbox": [70.0, 215.0, 520.0, 245.0]}
+    },
+    {
+      "id": "syn-pass-2-2-v1",
+      "document_id": "syn-pass-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "2.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Пропуск на автомобиль оформляется за 2 рабочих дня и согласуется со службой охраны.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [70.0, 100.0, 520.0, 140.0]}
+    },
+    {
+      "id": "syn-pass-3-1-v1",
+      "document_id": "syn-pass-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "3.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Об утрате пропуска необходимо немедленно сообщить службе охраны.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [70.0, 150.0, 520.0, 185.0]}
+    },
+    {
+      "id": "syn-pass-3-2-v1",
+      "document_id": "syn-pass-v1",
+      "document_version": "v1",
+      "ordinal": 5,
+      "section": "3.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Замена утраченного пропуска изготавливается в течение 3 рабочих дней.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [70.0, 195.0, 520.0, 230.0]}
+    },
+    {
+      "id": "syn-leave-1-1-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Академический отпуск предоставляется по медицинским, семейным и иным уважительным причинам.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [72.0, 120.0, 520.0, 160.0]}
+    },
+    {
+      "id": "syn-leave-2-1-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "2.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Заявление подаётся не позднее чем за 10 рабочих дней до начала отпуска, кроме случаев по медицинским показаниям.",
+      "locator": {"kind": "pdf", "page": 2, "bbox": [72.0, 170.0, 520.0, 215.0]}
+    },
+    {
+      "id": "syn-leave-2-2-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "2.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. К заявлению по медицинским показаниям прилагается медицинское заключение.",
+      "locator": {"kind": "pdf", "page": 3, "bbox": [72.0, 100.0, 520.0, 135.0]}
+    },
+    {
+      "id": "syn-leave-3-1-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "3.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Максимальная продолжительность академического отпуска составляет 12 месяцев.",
+      "locator": {"kind": "pdf", "page": 3, "bbox": [72.0, 145.0, 520.0, 185.0]}
+    },
+    {
+      "id": "syn-leave-3-2-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "3.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Продление академического отпуска допускается не более одного раза.",
+      "locator": {"kind": "pdf", "page": 3, "bbox": [72.0, 195.0, 520.0, 230.0]}
+    },
+    {
+      "id": "syn-leave-4-1-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 5,
+      "section": "4.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. При возвращении из академического отпуска студенту утверждается индивидуальный учебный план.",
+      "locator": {"kind": "pdf", "page": 4, "bbox": [72.0, 100.0, 520.0, 140.0]}
+    },
+    {
+      "id": "syn-leave-5-1-v1",
+      "document_id": "syn-leave-v1",
+      "document_version": "v1",
+      "ordinal": 6,
+      "section": "5.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. В период академического отпуска стипендия не выплачивается.",
+      "locator": {"kind": "pdf", "page": 4, "bbox": [72.0, 150.0, 520.0, 185.0]}
+    },
+    {
+      "id": "syn-lim-1-v1",
+      "document_id": "syn-limits-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория «учебные мероприятия»: годовой лимит 500 000 условных единиц, порог согласования 50 000 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A2:C2"}
+    },
+    {
+      "id": "syn-lim-2-v1",
+      "document_id": "syn-limits-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория «командировки»: годовой лимит 300 000 условных единиц, порог согласования 30 000 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A3:C3"}
+    },
+    {
+      "id": "syn-lim-3-v1",
+      "document_id": "syn-limits-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория «оборудование»: годовой лимит 200 000 условных единиц, порог согласования 20 000 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A4:C4"}
+    },
+    {
+      "id": "syn-lim-4-v1",
+      "document_id": "syn-limits-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "Лимиты",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Категория «расходники»: годовой лимит 60 000 условных единиц, порог согласования 10 000 условных единиц.",
+      "locator": {"kind": "xlsx", "sheet": "Лимиты", "range": "A5:C5"}
+    },
+    {
+      "id": "syn-lim-5-v1",
+      "document_id": "syn-limits-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "Сроки",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Срок представления отчёта: 5 рабочих дней.",
+      "locator": {"kind": "xlsx", "sheet": "Сроки", "range": "A2:B2"}
+    },
+    {
+      "id": "syn-trip-1-1-v1",
+      "document_id": "syn-trip-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Служебная командировка согласуется руководителем подразделения.",
+      "locator": {"kind": "docx", "block": 0}
+    },
+    {
+      "id": "syn-trip-1-2-v1",
+      "document_id": "syn-trip-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "1.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Заявление на командировку подаётся за 14 календарных дней до выезда.",
+      "locator": {"kind": "docx", "block": 1}
+    },
+    {
+      "id": "syn-trip-2-1-v1",
+      "document_id": "syn-trip-v1",
+      "document_version": "v1",
+      "ordinal": 2,
+      "section": "2.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Суточные выплачиваются в размере 700 условных единиц за каждый день командировки.",
+      "locator": {"kind": "docx", "block": 2}
+    },
+    {
+      "id": "syn-trip-2-2-v1",
+      "document_id": "syn-trip-v1",
+      "document_version": "v1",
+      "ordinal": 3,
+      "section": "2.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Расходы на проживание возмещаются в пределах 5 000 условных единиц в сутки.",
+      "locator": {"kind": "docx", "block": 3}
+    },
+    {
+      "id": "syn-trip-3-1-v1",
+      "document_id": "syn-trip-v1",
+      "document_version": "v1",
+      "ordinal": 4,
+      "section": "3.1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Авансовый отчёт представляется в течение 5 рабочих дней после возвращения.",
+      "locator": {"kind": "docx", "block": 4}
+    },
+    {
+      "id": "syn-trip-3-2-v1",
+      "document_id": "syn-trip-v1",
+      "document_version": "v1",
+      "ordinal": 5,
+      "section": "3.2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Билеты приобретаются не позднее чем за 10 календарных дней до выезда.",
+      "locator": {"kind": "docx", "block": 5}
+    },
+    {
+      "id": "syn-trip-am-1-v1",
+      "document_id": "syn-trip-amend-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Изменение вступает в силу с 1 июля 2026 года. Пункт 2.1 изложить в редакции: суточные выплачиваются в размере 900 условных единиц за каждый день командировки.",
+      "locator": {"kind": "docx", "block": 0}
+    },
+    {
+      "id": "syn-trip-am-2-v1",
+      "document_id": "syn-trip-amend-v1",
+      "document_version": "v1",
+      "ordinal": 1,
+      "section": "2",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Пункт 3.2 изложить в редакции: билеты приобретаются не позднее чем за 7 календарных дней до выезда.",
+      "locator": {"kind": "docx", "block": 1}
+    },
+    {
+      "id": "syn-memo-trip-1-v1",
+      "document_id": "syn-memo-trip-v1",
+      "document_version": "v1",
+      "ordinal": 0,
+      "section": "1",
+      "text": "ИСКУССТВЕННЫЙ ПРИМЕР. Памятка бухгалтерии: суточные начисляются в размере 800 условных единиц за каждый день командировки.",
+      "locator": {"kind": "docx", "block": 0}
+    }
+  ]
+}

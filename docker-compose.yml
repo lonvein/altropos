@@ -1,0 +1,164 @@
+# Altropos deployment: three services.
+#
+#   app                 FastAPI/UI, published on 127.0.0.1 only
+#   embeddings-reranker BGE-M3 + BGE reranker, internal port 8081 only
+#   llm                 llama.cpp OpenAI-compatible server, internal port 8080 only
+#
+# Model services have no `ports:` mapping: they are reachable only on the
+# Compose network. Use scripts/start.sh so profile values from config/profiles/*
+# are applied and the GPU override is selected for the host.
+#
+# Service names and internal ports are the proposed integration contract with
+# Klim; change them together with navigator/config.py defaults.
+
+name: altropos
+
+services:
+  app:
+    image: altropos-app:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      PROFILE: ${PROFILE:-development}
+      DATA_DIR: /data/runtime
+      ML_URL: http://embeddings-reranker:8081
+      LLM_URL: http://llm:8080/v1
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      ML_ENABLED: ${ML_ENABLED:-false}
+      LLM_MODEL: ${LLM_MODEL:-Qwen3-4B-GGUF-Q4_K_M}
+      LLM_REVISION: ${LLM_REVISION:-UNVERIFIED}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_REVISION: ${EMBEDDING_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      RERANKER_REVISION: ${RERANKER_REVISION:-953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e}
+      ML_DEVICE: ${ML_DEVICE:-cpu}
+      THINKING_ENABLED: ${THINKING_ENABLED:-false}
+      LLM_CONCURRENCY: ${LLM_CONCURRENCY:-1}
+      CONTEXT_SIZE: ${CONTEXT_SIZE:-4096}
+      CONTEXT_BUDGET: ${CONTEXT_BUDGET:-2200}
+      MAX_OUTPUT_TOKENS: ${MAX_OUTPUT_TOKENS:-768}
+      PROMPT_RESERVE_TOKENS: ${PROMPT_RESERVE_TOKENS:-1024}
+      TOP_FRAGMENTS: ${TOP_FRAGMENTS:-4}
+      RERANK_THRESHOLD: ${RERANK_THRESHOLD:-0.0}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-90}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-40}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-300}
+      THRESHOLD_CALIBRATED: ${THRESHOLD_CALIBRATED:-false}
+      UI_SYNTHETIC_FALLBACK: ${UI_SYNTHETIC_FALLBACK:-}
+      ASK_ROUTER_MODULE: ${ASK_ROUTER_MODULE:-}
+      DOCUMENTS_ROUTER_MODULE: ${DOCUMENTS_ROUTER_MODULE:-}
+    ports:
+      # Do not use 0.0.0.0 here. Remote access goes through an SSH tunnel.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    volumes:
+      - runtime:/data/runtime
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  embeddings-reranker:
+    image: altropos-ml:local
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+    profiles: ["models"]
+    init: true
+    restart: unless-stopped
+    environment:
+      PROFILE: ${PROFILE:-development}
+      ML_ENABLED: "true"
+      ML_DEVICE: ${ML_DEVICE:-cpu}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_REVISION: ${EMBEDDING_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      RERANKER_REVISION: ${RERANKER_REVISION:-953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-90}
+      HF_HOME: /models/hf
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    expose:
+      - "8081"
+    volumes:
+      - models:/models:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8081),2); s.close()"]
+      interval: 20s
+      timeout: 3s
+      start_period: 180s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  llm:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b5350@sha256:8a0a31d0b342f96b2c5453eedadbb0544d6d426bd43c9ea6f62b2bd2489be676}
+    profiles: ["models"]
+    init: true
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec /app/llama-server \
+          --model "/models/gguf/$${LLM_GGUF_FILE}" \
+          --alias "$${LLM_MODEL}" \
+          --host 0.0.0.0 \
+          --port 8080 \
+          --ctx-size "$${CONTEXT_SIZE}" \
+          --n-gpu-layers "$${LLM_N_GPU_LAYERS}" \
+          --parallel 1 \
+          --jinja \
+          $${LLM_EXTRA_ARGS}
+    environment:
+      LLM_GGUF_FILE: ${LLM_GGUF_FILE:-Qwen3-4B-Q4_K_M.gguf}
+      LLM_MODEL: ${LLM_MODEL:-Qwen3-4B-GGUF-Q4_K_M}
+      CONTEXT_SIZE: ${CONTEXT_SIZE:-4096}
+      LLM_N_GPU_LAYERS: ${LLM_N_GPU_LAYERS:-0}
+      LLM_EXTRA_ARGS: ${LLM_EXTRA_ARGS:-}
+    expose:
+      - "8080"
+    volumes:
+      - models:/models:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  runtime:
+    name: ${RUNTIME_VOLUME:-altropos_runtime}
+  models:
+    name: ${MODELS_VOLUME:-altropos_models}

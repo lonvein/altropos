@@ -1,0 +1,11 @@
+# RTX 3060 Ti override: LLM uses the GPU, BGE embeddings/reranker stay on CPU.
+# Applied by scripts/start.sh after docker-compose.yml.
+services:
+  llm:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

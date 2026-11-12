@@ -42,6 +42,13 @@ class MLHandler(BaseHTTPRequestHandler):
         self._send(status, ErrorResponse(error=ErrorDetail(
             code=code, message=message, retryable=retryable)).model_dump(mode="json"))
 
+    def do_GET(self):
+        # Deployment liveness only: never loads a model or exposes source text.
+        if self.path == "/health":
+            self._send(200, {"status": "ok"})
+            return
+        self._error(404, "not_found", "Неизвестный ML endpoint.")
+
     def do_POST(self):
         self.connection.settimeout(10)
         routes = {"/embed": (EmbeddingRequest, EmbeddingResponse, self.server.backend.embed),
