@@ -1,6 +1,9 @@
 """Smoke test for the application shell, without models or network."""
 from __future__ import annotations
 
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -42,3 +45,32 @@ def test_pages_render_without_model_services(client):
         assert "Altropos" in response.text
     health = client.get("/health")
     assert "application/json" in health.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_local_model_probe_ignores_unrelated_proxy(monkeypatch):
+    from navigator.ui.health import _probe
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ready"}')
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    try:
+        result = await _probe(f"http://127.0.0.1:{server.server_port}/health")
+        assert result == {"status": "ok", "http_status": 200}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
