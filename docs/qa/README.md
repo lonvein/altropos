@@ -11,6 +11,7 @@
 | `docs/results.csv` | шаблон фактических результатов по двум машинам |
 | `docs/qa/machine-runbook.md` | порядок прогона на A100 и 3060 Ti |
 | `docs/qa/interface-checklist.md` | проверка UI по статусам, ссылкам и перезагрузке |
+| `docs/verification.md` | границы подтверждённого: тесты, локальный запуск, что не проверено |
 
 Пересобрать таблицу: `python scripts/render_qa.py`. Скрипт не перезаписывает уже
 заполненный `docs/results.csv`.

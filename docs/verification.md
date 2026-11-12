@@ -31,7 +31,7 @@ volume выполнены быть не могли.
 
 ```bash
 .venv/bin/python -m pytest -q
-# 143 passed, 1 warning in 6.28s
+# 145 passed, 1 warning in 9.48s
 ```
 
 Единственное предупреждение — устаревание `httpx` в `starlette.testclient`; оно не
