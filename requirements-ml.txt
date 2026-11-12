@@ -1,0 +1,7 @@
+# Embeddings/reranker runtime (CPU profile by default).
+# torch is installed from a separate index selected by Dockerfile.ml build args:
+#   CPU:  https://download.pytorch.org/whl/cpu
+#   CUDA: https://download.pytorch.org/whl/cu126 (A100)
+torch==2.7.1
+transformers==4.57.6
+sentencepiece==0.2.3

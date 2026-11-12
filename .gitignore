@@ -9,7 +9,9 @@ __pycache__/
 *.key
 runtime/
 models/
+backups/
 artifacts/
+docs/demo/recordings/
 *.pyc
 *.sqlite*
 Данные/

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Altropos Navigator{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/common.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body data-data-mode="{{ integration.data_mode }}" data-profile="{{ profile }}">
+  <a class="skip-link" href="#main">Перейти к содержимому</a>
+
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="/" aria-label="Altropos Navigator — на главную">
+        <span class="brand__mark" aria-hidden="true">A</span>
+        <span class="brand__text">
+          <span class="brand__name">Altropos</span>
+          <span class="brand__subtitle">навигатор по регламентам</span>
+        </span>
+      </a>
+
+      <nav class="main-nav" aria-label="Основная навигация">
+        <a href="/" class="main-nav__link{% if page == 'ask' %} is-active{% endif %}"
+           {% if page == 'ask' %}aria-current="page"{% endif %}>Задать вопрос</a>
+        <a href="/documents" class="main-nav__link{% if page == 'documents' %} is-active{% endif %}"
+           {% if page == 'documents' %}aria-current="page"{% endif %}>Документы</a>
+      </nav>
+
+      <button type="button" class="health-pill" id="health-button"
+              aria-haspopup="dialog" aria-controls="health-dialog" title="Состояние приложения">
+        <span class="health-pill__dot" aria-hidden="true"></span>
+        <span id="health-pill-text">Состояние: проверка…</span>
+      </button>
+    </div>
+  </header>
+
+  {% if integration.data_mode != 'real' %}
+    <div class="mode-banner mode-banner--{{ integration.data_mode }}" role="status">
+      <div class="mode-banner__inner">
+        {% if integration.data_mode == 'synthetic' %}
+          <strong>Демонстрационный режим.</strong>
+          API вопросов и документов — искусственные заглушки. Ответы не являются результатом
+          поиска или модели. Такой режим допустим только для разработки интерфейса.
+        {% elif integration.data_mode == 'unavailable' %}
+          <strong>API не подключён.</strong>
+          Страницы доступны, но вопросы и документы работать не будут. Проверьте routers
+          в <code>navigator/main.py</code> и состояние <a href="/health">/health</a>.
+        {% else %}
+          <strong>Ограниченный режим интеграции.</strong>
+          Часть API работает на заглушках или недоступна. Подробности — в
+          <a href="/health">/health</a>.
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+
+  <main id="main" class="site-main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-footer__inner">
+      <span>Altropos · локальный прототип</span>
+      <span>
+        Профиль <code>{{ profile }}</code> ·
+        <a href="/health">состояние компонентов</a>
+      </span>
+    </div>
+  </footer>
+
+  <dialog id="health-dialog" class="dialog" aria-labelledby="health-dialog-title">
+    <div class="dialog__header">
+      <div>
+        <h2 id="health-dialog-title">Состояние приложения</h2>
+        <p class="muted" id="health-summary">Загрузка сведений…</p>
+      </div>
+      <button type="button" class="icon-button" data-close-dialog aria-label="Закрыть">×</button>
+    </div>
+    <div class="health-grid">
+      <section class="health-card">
+        <h3>Приложение</h3>
+        <p><span class="health-value" id="health-app">—</span></p>
+        <p class="muted" id="health-mode">—</p>
+      </section>
+      <section class="health-card">
+        <h3>ML / поиск</h3>
+        <p><span class="health-value" id="health-ml">—</span></p>
+      </section>
+      <section class="health-card">
+        <h3>LLM</h3>
+        <p><span class="health-value" id="health-llm">—</span></p>
+      </section>
+    </div>
+    <section class="health-reasons">
+      <h3>Причины ограниченного режима</h3>
+      <ul id="health-reasons" class="plain-list">
+        <li>Загрузка…</li>
+      </ul>
+    </section>
+    <div class="dialog__actions">
+      <a class="button button--secondary" href="/health" target="_blank" rel="noopener">Открыть JSON</a>
+      <button type="button" class="button button--primary" data-close-dialog>Закрыть</button>
+    </div>
+  </dialog>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>
