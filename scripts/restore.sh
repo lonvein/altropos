@@ -76,6 +76,14 @@ docker run --rm --user root \
   altropos-app:local \
   -xzf "/backup/$(basename "$ARCHIVE")" -C /data
 
+# Extraction runs as root; restore ownership to the app user (uid/gid 10001)
+# so SQLite, originals and indexes remain writable after the restart.
+docker run --rm --user root \
+  -v "$RUNTIME_VOLUME:/data" \
+  --entrypoint /bin/sh \
+  altropos-app:local \
+  -c 'chown -R 10001:10001 /data'
+
 echo "Starting the application..."
 "${COMPOSE[@]}" up -d app >/dev/null
 

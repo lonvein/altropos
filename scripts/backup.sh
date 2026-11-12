@@ -69,6 +69,14 @@ docker run --rm --user root \
   altropos-app:local \
   -czf "/backup/$ARCHIVE" -C /data .
 
+# tar runs as root to read the app-owned volume, so the archive is root-owned
+# on the host. Return it to the invoking user before checksums and chmod.
+docker run --rm --user root \
+  -v "$BACKUP_DIR:/backup" \
+  --entrypoint /bin/sh \
+  altropos-app:local \
+  -c "chown $(id -u):$(id -g) '/backup/$ARCHIVE'"
+
 if ! tar -tzf "$BACKUP_DIR/$ARCHIVE" >/dev/null 2>&1; then
   echo "Archive verification failed: $BACKUP_DIR/$ARCHIVE" >&2
   exit 1
