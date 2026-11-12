@@ -319,3 +319,134 @@ def test_pdf_unresolved_note_is_preserved_and_flagged(tmp_path):
     parsed = parse_pdf(path)
     assert parsed.needs_review and parsed.diagnostics[0]['warnings']
     assert any('Synthetic footnote' in draft.text for draft in parsed.build())
+
+def test_separator_ignores_full_width_and_broken_table_edges():
+    from PIL import ImageDraw
+    image = Image.new('RGB', (800,1000), 'white')
+    draw = ImageDraw.Draw(image)
+    draw.line((80,760,700,762), fill='black', width=2)
+    draw.line((80,830,700,833), fill='black', width=2)
+    assert module._footnote_separator(image) is None
+    draw.line((80,900,270,900), fill='black', width=2)
+    assert module._footnote_separator(image) == pytest.approx(901, abs=2)
+
+
+def test_note_zone_keeps_similar_height_notes_and_unknown_marker_continuation():
+    items = [
+        {'text': '3 Synthetic condition.', 'work_bbox':[80,910,350,924], 'height':18},
+        {'text': '4 Other synthetic condition.', 'work_bbox':[80,935,350,949], 'height':18},
+    ]
+    module._classify_notes(items,20,1000,900)
+    assert all(item['note'] for item in items)
+    assert not any(item['note_continuation'] for item in items)
+    unknown = [
+        {'text':'x Synthetic condition with unreadable marker.', 'work_bbox':[80,910,400,924], 'height':18},
+        {'text':'Continuation of that condition.', 'work_bbox':[80,935,400,949], 'height':18},
+        {'text':'8 Separate synthetic condition.', 'work_bbox':[80,960,400,974], 'height':18},
+    ]
+    module._classify_notes(unknown,20,1000,900)
+    assert all(item['note'] for item in unknown)
+    assert unknown[0]['note_marker_uncertain']
+    assert unknown[1]['note_continuation']
+    assert not unknown[2]['note_continuation']
+
+
+@pytest.mark.parametrize('text', ['6) Synthetic list item.', '3. Synthetic instruction.', '4.1. Another instruction.'])
+def test_small_numbered_body_is_never_a_note(text):
+    item = {'text':text,'work_bbox':[80,920,400,934], 'height':10}
+    module._classify_notes([item],20,1000,900)
+    assert not item['note']
+
+
+def test_rule_artifact_requires_raster_evidence_and_preserves_normal_letters():
+    from PIL import ImageDraw
+    image = Image.new('RGB',(800,1000),'white')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((100,200,600,230), outline='black', width=2)
+    assert module._rule_like_word(image,[100,200,601,231],'XY')
+    blank = Image.new('RGB',(800,1000),'white')
+    ImageDraw.Draw(blank).text((100,200),'XY',fill='black')
+    assert not module._rule_like_word(blank,[100,200,601,231],'XY')
+    assert not module._rule_like_word(image,[100,200,601,231],'Actual heading text')
+
+
+def test_marker_geometry_distinguishes_raised_digit_from_damaged_suffix():
+    words = [
+        {'text':'Synthetic','box':[10,20,70,40],'line':1,'conf':95},
+        {'text':'7','box':[71,17,75,28],'line':1,'conf':92},
+        {'text':'clause?;','box':[80,20,160,40],'line':1,'conf':92},
+    ]
+    markers = module._reference_markers(words)
+    assert [(m['text'],m['confirmed']) for m in markers] == [('7', True), ('?',False)]
+    words[1]['conf'] = 40
+    assert not module._reference_markers(words)[0]['confirmed']
+
+
+def test_damaged_markers_produce_candidates_without_inventing_links():
+    from navigator.ingestion.pdf_parser import _link_notes
+    units = [Unit('Synthetic clause?;',{'kind':'pdf','page':1,'bbox':[10,10,100,30]}),
+             Unit('3 Synthetic condition.',{'kind':'pdf','page':1,'bbox':[10,900,300,920]},kind='note')]
+    blocks = [{'page':1,'text':u.text,'bbox':u.locator['bbox']} for u in units]
+    blocks[0]['reference_markers'] = [{'text':'?','confirmed':False,'bbox':[90,10,100,20]}]
+    diagnostics = [{'page':1,'warnings':[],'needs_review':False}]
+    _link_notes(units,blocks,diagnostics)
+    assert not units[0].note_refs
+    assert diagnostics[0]['needs_review']
+    assert not blocks[1]['linked'] and blocks[1]['candidate_grounds']
+    assert units[1].text.startswith('3 ')
+
+
+def test_marker_matching_is_exact_and_can_use_confirmed_raster_geometry():
+    from navigator.ingestion.pdf_parser import _link_notes
+    units = [Unit('Synthetic clause\u00b9\u00b3.',{'kind':'pdf','page':1,'bbox':[10,10,100,30]}),
+             Unit('Other clause 7.',{'kind':'pdf','page':1,'bbox':[10,40,100,60]}),
+             Unit('3 First condition.',{'kind':'pdf','page':1,'bbox':[10,900,300,920]},kind='note'),
+             Unit('7 Second condition.',{'kind':'pdf','page':1,'bbox':[10,940,300,960]},kind='note')]
+    blocks = [{'page':1,'text':u.text,'bbox':u.locator['bbox']} for u in units]
+    blocks[1]['reference_markers'] = [{'text':'7','confirmed':True,'bbox':[90,35,100,45]}]
+    diagnostics = [{'page':1,'warnings':[],'needs_review':False}]
+    _link_notes(units,blocks,diagnostics)
+    assert not units[0].note_refs  # 3 is not a match for superscript 13
+    assert units[1].note_refs == (units[3].note_id,)
+
+
+def test_parser_keeps_rule_evidence_and_joins_only_note_continuations(tmp_path):
+    path = tmp_path / 'synthetic.pdf'
+    path.write_bytes(make_pdf([None]))
+    def hook(image, number):
+        return module.OCRResult([
+            {'text':'1. Synthetic body instruction.', 'bbox':[10,100,200,120], 'note':False},
+            {'text':'x Synthetic note.', 'bbox':[10,900,200,920], 'note':True},
+            {'text':'XY', 'bbox':[10,925,200,930], 'suspected_rule':True},
+            {'text':'Continuation.', 'bbox':[10,935,200,950], 'note':True,'note_continuation':True},
+        ], source='ocr',rotation=0,warnings=[],needs_review=True)
+    parsed = parse_pdf(path,ocr=hook)
+    assert parsed.needs_review
+    assert len(parsed.units) == 2
+    assert parsed.units[0].kind != 'note'
+    assert parsed.units[1].text == 'x Synthetic note. Continuation.'
+    assert any(b.get('kind')=='ocr_artifact' and b['text']=='XY' for b in parsed.blocks)
+    assert parsed.units[1].locator['bbox'] == [10,900,200,950]
+
+def test_bare_ocr_asterisk_is_not_a_confirmed_footnote_reference():
+    from navigator.ingestion.pdf_parser import _link_notes
+    units = [Unit('Synthetic value * factor.',{'kind':'pdf','page':1,'bbox':[10,10,100,30]}),
+             Unit('* Synthetic condition.',{'kind':'pdf','page':1,'bbox':[10,900,300,920]},kind='note')]
+    blocks = [{'page':1,'text':u.text,'bbox':u.locator['bbox'],'ocr':True} for u in units]
+    diagnostics = [{'page':1,'warnings':[],'needs_review':False}]
+    _link_notes(units,blocks,diagnostics)
+    assert not units[0].note_refs
+    assert diagnostics[0]['needs_review']
+
+def test_native_note_continuation_is_preserved_but_numbered_list_is_not_a_note():
+    from types import SimpleNamespace
+    from navigator.ingestion.pdf_parser import _page_lines
+    def line(text, top, size):
+        return {'text':text, 'top':top, 'bottom':top+10, 'x0':10, 'x1':200,
+                'chars':[{'text':text,'size':size,'fontname':'Synthetic'}]}
+    lines = [line('Synthetic body.',y,12) for y in (100,120,140,160)]
+    lines += [line('3 Synthetic condition.',900,8), line('Continued condition.',915,8),
+              line('6) Synthetic list.',930,8)]
+    page = SimpleNamespace(height=1000, extract_text_lines=lambda **kw: lines)
+    result = _page_lines(page,[])
+    assert [item['note'] for item in result[-3:]] == [True,True,False]

@@ -79,8 +79,15 @@ def _page_lines(page, table_boxes) -> list[dict]:
                        "bold": bold, "size": size})
     if result:
         body = Counter(round(l["size"], 1) for l in result).most_common(1)[0][0]
-        for l in result:
-            l["note"] = l["size"] < body - 1.5 and l["top"] > page.height * 0.7
+        previous = None
+        for line in result:
+            marker = re.match(r"^(?:\d+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+|[*†‡]+)\s+", line["text"])
+            point = re.match(r"^\d+[.)]", line["text"])
+            continuation = (previous and previous["note"]
+                            and line["top"]-previous["bottom"] < max(1, previous["bottom"]-previous["top"])*1.2)
+            line["note"] = bool(line["size"] < body - 1.5 and line["top"] > page.height*.7
+                                and not point and (marker or continuation))
+            previous = line
     return result
 
 
@@ -149,13 +156,27 @@ def _link_notes(units, blocks, diagnostics):
         if note.kind != "note":
             continue
         page = note.locator["page"]
-        match = re.match(r"^\s*(\d+|[*†‡]+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)[.)]?\s+", note.text)
+        match = re.match(r"^\s*(\d+|[*†‡]+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s+", note.text)
         candidates = []
         if match:
             marker = match[1]
-            needles = [f"[{marker}]", marker.translate(superscripts)] if marker.isascii() and marker.isdigit() else [marker]
-            candidates = [u for u in units[:index] if u.kind != "note" and u.locator.get("page") == page
-                          and any(n in u.text for n in needles)]
+            if marker.isascii() and marker.isdigit():
+                pattern = re.compile(r"\["+re.escape(marker)+r"\]|(?<![⁰¹²³⁴⁵⁶⁷⁸⁹])"
+                                     +re.escape(marker.translate(superscripts))+r"(?![⁰¹²³⁴⁵⁶⁷⁸⁹])")
+            else:
+                pattern = re.compile(r"(?<![*†‡⁰¹²³⁴⁵⁶⁷⁸⁹])"+re.escape(marker)+r"(?![*†‡⁰¹²³⁴⁵⁶⁷⁸⁹])")
+            for unit in units[:index]:
+                if unit.kind == "note" or unit.locator.get("page") != page:
+                    continue
+                evidence = [m for b in blocks if b.get("page") == page
+                            and b.get("bbox") == unit.locator.get("bbox")
+                            for m in b.get("reference_markers", [])]
+                literal = bool(pattern.search(unit.text))
+                if all(c in "*†‡" for c in marker):
+                    # A bare asterisk may be multiplication or damaged OCR punctuation.
+                    literal = f"[{marker}]" in unit.text
+                if literal or any(m.get("confirmed") and m["text"] == marker for m in evidence):
+                    candidates.append(unit)
         note.note_id = f"pdf:{page}:{index}"
         if len(candidates) == 1:
             candidates[0].note_refs += (note.note_id,)
@@ -167,6 +188,11 @@ def _link_notes(units, blocks, diagnostics):
             if block.get("page") == page and block.get("text") == note.text:
                 block.update(kind="note", note_id=note.note_id,
                              linked=len(candidates) == 1)
+                if len(candidates) != 1:
+                    block["candidate_grounds"] = [
+                        {"bbox": b.get("bbox"), "markers": b["reference_markers"]}
+                        for b in blocks if b.get("page") == page and not b.get("kind") == "note"
+                        and b.get("reference_markers") and b.get("bbox", [0,0,0,0])[1] < note.locator.get("bbox", [0,0,0,0])[1]]
 
 
 def parse_pdf(path: Path, ocr=None) -> Parsed:
@@ -210,6 +236,23 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     continue
                 ocr_pages.append(number)
                 for item in result:
+                    if item.get("suspected_rule"):
+                        blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
+                                       "ocr": True, "kind": "ocr_artifact", "suspected_rule": True})
+                        diag["needs_review"] = True
+                        continue
+                    if item.get("note_continuation") and units and units[-1].kind == "note" \
+                            and units[-1].locator.get("page") == number:
+                        previous = units[-1]
+                        previous_block = next(b for b in reversed(blocks)
+                                              if b.get("page") == number and b.get("text") == previous.text)
+                        previous.text += " " + item["text"]
+                        old, new = previous.locator.get("bbox"), item.get("bbox")
+                        if old and new:
+                            previous.locator["bbox"] = [min(old[0],new[0]),min(old[1],new[1]),
+                                                        max(old[2],new[2]),max(old[3],new[3])]
+                        previous_block.update(text=previous.text, bbox=previous.locator.get("bbox"))
+                        continue
                     box = item.get("bbox")
                     is_note = bool(item.get("note"))
                     info = None if is_note else outline.feed(item["text"])
@@ -220,7 +263,8 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                                       path=info.path if info else outline.path,
                                       kind=info.kind if info else "note", atomic=len(item["text"]) < 900))
                     blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"), "ocr": True,
-                                   "conf": item.get("conf")})
+                                   "conf": item.get("conf"), "reference_markers": item.get("reference_markers", []),
+                                   "kind": "note" if is_note else info.kind})
                 continue
 
             table_boxes, tables = [], []
