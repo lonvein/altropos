@@ -247,6 +247,121 @@ def _reference_markers(words):
     return result
 
 
+def _isolated_marker(word, following, body_height):
+    x0,y0,x1,y1 = word["box"]
+    w,h = x1-x0,y1-y0
+    return bool(body_height and .22*body_height <= h <= .8*body_height
+                and .65 <= w/max(h,1) <= 1.4 and following["box"][0]-x1 >= body_height*1.5)
+
+
+def _filled_bullet(image, word, following, body_height):
+    """Use raster shape and indentation, independent of the OCR character label."""
+    import numpy as np
+    if not _isolated_marker(word,following,body_height):
+        return False
+    x0,y0,x1,y1 = word["box"]
+    w,h = x1-x0,y1-y0
+    ink = np.asarray(image.crop((int(x0),int(y0),int(x1),int(y1))).convert("L")) < 170
+    center = ink[int(h*.25):max(int(h*.75),1),int(w*.25):max(int(w*.75),1)]
+    return bool(ink.size and center.size and ink.mean() > .65 and center.mean() > .9)
+
+
+def _reread_number(image, box, read, original="", confidence=0):
+    """Changes require two local readings; one can confirm an unchanged source number."""
+    import re
+    from collections import Counter
+    x0,y0,x1,y1 = box
+    pad = max(3, round((y1-y0)*.13))
+    crop = image.crop((max(0,int(x0)-pad),max(0,int(y0)-pad),
+                       min(image.width,int(x1)+pad),min(image.height,int(y1)+pad))).convert("L")
+    readings = [original] if confidence >= 70 and re.fullmatch(r"\d+(?:\.\d+)+[.)]?",original) else []
+    for variant, psm in ((crop,7),(crop,13),(crop.point(lambda v: 255 if v > 160 else 0),7)):
+        try:
+            text, confidence = read(variant,psm)
+        except Exception:
+            continue
+        text = text.strip()
+        if confidence >= 70 and re.fullmatch(r"\d+(?:\.\d+)+[.)]?", text):
+            readings.append(text)
+        counts = Counter(readings)
+        if counts and counts.most_common(1)[0][1] >= 2:
+            return counts.most_common(1)[0][0]
+    return None
+
+
+def _layout_groups(paragraphs, image, read, diagnostics):
+    """Recover marker boundaries and hanging continuations across OCR paragraphs."""
+    import re
+    from statistics import median
+    heights = [h for par in paragraphs.values() for h in par["heights"]]
+    body = median(heights) if heights else 0
+    groups = []
+    serial = 0
+    for key, par in paragraphs.items():
+        line_ids = list(dict.fromkeys(word["line"] for word in par["words"]))
+        for line_id in line_ids:
+            words = [dict(word) for word in par["words"] if word["line"] == line_id]
+            raw = " ".join(word["text"] for word in words)
+            first = words[0]
+            changes = []
+            bullet = len(words) > 1 and _filled_bullet(image,first,words[1],body)
+            if (not bullet and len(words)>1 and len(first["text"]) <= 2 and first["conf"] < 70
+                    and _isolated_marker(first,words[1],body)):
+                diagnostics["needs_review"] = True
+                diagnostics["warnings"].append("Неоднозначный маркер списка; исходный символ сохранён")
+            body_word = next((word for word in words[1:] if any(c.isalpha() for c in word["text"])),
+                             words[1] if len(words)>1 else first)
+            number = (not bullet and len(words)>1 and "." in first["text"]
+                      and re.fullmatch(r"\d[\d.\]\[|Il)]{1,12}", first["text"])
+                      and body_word["box"][0]-first["box"][2] >= body*1.25)
+            if bullet:
+                first["text"] = "•"
+                if raw != " ".join(word["text"] for word in words):
+                    changes.append({"kind":"bullet", "before":raw.split()[0],
+                                    "after":"•", "box":first["box"]})
+            elif number and (first["conf"] < 90 or not re.fullmatch(r"\d+(?:\.\d+)+[.)]?",first["text"])):
+                corrected = _reread_number(image,first["box"],read,first["text"],first["conf"])
+                if corrected and corrected != first["text"]:
+                    changes.append({"kind":"number", "before":first["text"],"after":corrected,"box":first["box"]})
+                    first["text"] = corrected
+                    diagnostics["warnings"].append("Номер пункта уточнён согласованным повторным OCR области")
+                elif corrected is None:
+                    diagnostics["needs_review"] = True
+                    diagnostics["warnings"].append(f"Номер пункта {first['text']} не подтверждён повторным OCR области")
+            top = min(word["box"][1] for word in words)
+            bottom = max(word["box"][3] for word in words)
+            left = min(word["box"][0] for word in words)
+            previous = groups[-1] if groups else None
+            gap = top-previous["box"][3] if previous else 0
+            hanging = (previous and previous["list_item"] and not number and not bullet
+                       and abs(left-previous["body_left"]) < max(3,body*.7) and 0 <= gap < body*1.8)
+            same_par = previous and previous["par_key"] == key
+            continued_point = (previous and previous["numbered"] and not previous["list_item"]
+                               and not previous["text"].rstrip().endswith((".",";",":"))
+                               and abs(left-previous["box"][0]) < max(3,body*.7) and 0 <= gap < body*1.8)
+            if not previous or bullet or number or not (same_par or hanging or continued_point):
+                group = {"words":[],"line":{},"box":[left,top,left,bottom],"confs":[],"heights":[],
+                         "list_item":bool(bullet),"numbered":bool(number),"body_left":words[1]["box"][0] if bullet else left,
+                         "par_key":key,"raw_text":"","text":"","layout_corrections":[]}
+                groups.append(group)
+            else:
+                group = previous
+            serial += 1
+            for word in words:
+                word["line"] = serial
+                group["words"].append(word)
+                group["confs"].append(word["conf"])
+                group["heights"].append(word["box"][3]-word["box"][1])
+                box = group["box"]
+                box[:] = [min(box[0],word["box"][0]),min(box[1],word["box"][1]),
+                          max(box[2],word["box"][2]),max(box[3],word["box"][3])]
+            group["line"][serial] = [word["text"] for word in words]
+            group["text"] = " ".join(" ".join(line) for line in group["line"].values())
+            group["raw_text"] = (group["raw_text"]+" "+raw).strip()
+            group["layout_corrections"].extend(changes)
+    return groups
+
+
 def make_ocr(tesseract_cmd=None, tessdata_dir=None):
     status = ocr_status(tesseract_cmd, tessdata_dir)
     if not status["available"]:
@@ -319,12 +434,22 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
         from statistics import median
         body_height = median(heights) if heights else 0
         items = []
-        for par in paragraphs.values():
+        def read_number(crop, psm):
+            data = pytesseract.image_to_data(crop, lang="eng",
+                config=f"{config} --psm {psm} -c tessedit_char_whitelist=0123456789.", output_type=Output.DICT)
+            values = [(t,float(c)) for t,c in zip(data["text"],data["conf"]) if t.strip()]
+            return ("".join(t for t,_ in values), min(c for _,c in values)) if values else ("",0.)
+
+        for par in _layout_groups(paragraphs,work,read_number,diag):
             text = " ".join(" ".join(words) for _, words in sorted(par["line"].items()))
             markers = _reference_markers(par["words"])
             for marker in markers:
                 marker["bbox"] = _inverse_box(marker.pop("box"), steps, original_size, page_size)
-            items.append({"text": text, "bbox": _inverse_box(par["box"], steps, original_size, page_size),
+            changes = par["layout_corrections"]
+            for change in changes:
+                change["bbox"] = _inverse_box(change.pop("box"), steps, original_size, page_size)
+            items.append({"text": text, "raw_text":par["raw_text"], "list_item":par["list_item"],
+                          "layout_corrections":changes, "bbox": _inverse_box(par["box"], steps, original_size, page_size),
                           "conf": sum(par["confs"])/len(par["confs"]),
                           "work_bbox": par["box"], "height": median(par["heights"]),
                           "reference_markers": markers,

@@ -255,7 +255,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                         continue
                     box = item.get("bbox")
                     is_note = bool(item.get("note"))
-                    info = None if is_note else outline.feed(item["text"])
+                    info = None if is_note else outline.feed(item["text"], list_item=bool(item.get("list_item")))
                     loc = {"kind": "pdf", "page": number}
                     if item.get("bbox"):
                         loc["bbox"] = item["bbox"]
@@ -264,7 +264,9 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                                       kind=info.kind if info else "note", atomic=len(item["text"]) < 900))
                     blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"), "ocr": True,
                                    "conf": item.get("conf"), "reference_markers": item.get("reference_markers", []),
-                                   "kind": "note" if is_note else info.kind})
+                                   "kind": "note" if is_note else info.kind,
+                                   "list_item": bool(item.get("list_item")), "raw_text": item.get("raw_text", item["text"]),
+                                   "layout_corrections": item.get("layout_corrections", [])})
                 continue
 
             table_boxes, tables = [], []

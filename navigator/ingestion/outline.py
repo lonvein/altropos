@@ -38,7 +38,10 @@ class Outline:
     def path(self) -> tuple[str, ...]:
         return tuple(x for x in (self.top, self.sub) if x)
 
-    def feed(self, text: str, style_heading: bool = False) -> Classified:
+    def feed(self, text: str, style_heading: bool = False, list_item: bool = False) -> Classified:
+        if list_item or re.match(r"^[•●▪]\s", text):
+            self._expect_appendix_title = False
+            return Classified("paragraph", "", self.path)
         point = POINT.match(text)
         if self._expect_appendix_title and not point:
             self._expect_appendix_title = False
