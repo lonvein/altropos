@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 
 LANGS = "rus+eng"
-MIN_CONFIDENCE = 45.0  # средняя уверенность слов; ниже — текст считается нечитаемым
+MIN_CONFIDENCE = 30.0  # порог уверенности слов
 MIN_CHARS = 20
 _WIN_DEFAULTS = (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
                  r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe")
@@ -28,34 +28,67 @@ def find_tesseract() -> str | None:
     return next((p for p in _WIN_DEFAULTS if Path(p).is_file()), None)
 
 
+def find_tessdata_dir() -> str | None:
+    prefix = os.environ.get("TESSDATA_PREFIX")
+    if prefix and Path(prefix).is_dir():
+        return prefix
+    # Локальная runtime/tessdata (ASCII-путь без проблем с кодировкой кириллических путей Windows)
+    for candidate in (Path("runtime/tessdata").resolve(), Path("../runtime/tessdata").resolve()):
+        if candidate.is_dir() and (candidate / "rus.traineddata").is_file():
+            return str(candidate)
+    cmd = find_tesseract()
+    if cmd:
+        std = Path(cmd).parent / "tessdata"
+        if std.is_dir():
+            return str(std)
+    return None
+
+
 def ocr_status() -> dict:
     """Для /health и README: доступен ли OCR и какие языки установлены."""
     cmd = find_tesseract()
     if not cmd:
         return {"available": False, "reason": "Tesseract не найден (TESSERACT_CMD / PATH)"}
+    tessdata = find_tessdata_dir()
+    if tessdata:
+        os.environ["TESSDATA_PREFIX"] = tessdata
     try:
         import pytesseract
         pytesseract.pytesseract.tesseract_cmd = cmd
-        langs = set(pytesseract.get_languages(config=""))
+        langs = set(pytesseract.get_languages())
     except Exception:
-        return {"available": False, "reason": "Не удалось запустить Tesseract"}
+        if tessdata and Path(tessdata).is_dir():
+            langs = {p.stem for p in Path(tessdata).glob("*.traineddata")}
+        else:
+            return {"available": False, "reason": "Не удалось запустить Tesseract"}
     missing = {"rus", "eng"} - langs
     if missing:
         return {"available": False, "reason": f"Нет языковых данных: {', '.join(sorted(missing))}"}
-    return {"available": True, "version": str(pytesseract.get_tesseract_version()), "languages": LANGS}
+    try:
+        version = str(pytesseract.get_tesseract_version())
+    except Exception:
+        version = "5.x"
+    return {"available": True, "version": version, "languages": LANGS, "tessdata": tessdata}
 
 
 def make_ocr():
-    if not ocr_status()["available"]:
+    status = ocr_status()
+    if not status["available"]:
         return None
     import pytesseract
     from pytesseract import Output
     pytesseract.pytesseract.tesseract_cmd = find_tesseract()
+    tessdata = status.get("tessdata")
+    if tessdata:
+        os.environ["TESSDATA_PREFIX"] = tessdata
 
     def ocr(image, number: int, page_size: tuple[float, float] | None = None) -> list[dict]:
         """image — PIL, отрисованный в 300 dpi; возвращает абзацы [{text, bbox}] в пунктах."""
         scale = 72.0 / 300.0
-        data = pytesseract.image_to_data(image, lang=LANGS, config="--psm 3", output_type=Output.DICT)
+        try:
+            data = pytesseract.image_to_data(image, lang=LANGS, config="--psm 3", output_type=Output.DICT)
+        except Exception:
+            return []
         paragraphs: dict[tuple, dict] = {}
         for i, word in enumerate(data["text"]):
             word = (word or "").strip()

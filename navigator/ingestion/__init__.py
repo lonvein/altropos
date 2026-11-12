@@ -13,6 +13,9 @@ def parse_file(path: Path, media_type: str | None = None, **kwargs) -> Parsed:
     media_type = media_type or SUPPORTED.get(Path(path).suffix.lower())
     if media_type == "pdf":
         from navigator.ingestion.pdf_parser import parse_pdf
+        if "ocr" not in kwargs:
+            from navigator.ingestion.ocr import make_ocr
+            kwargs["ocr"] = make_ocr()
         return parse_pdf(Path(path), **kwargs)
     if media_type == "docx":
         from navigator.ingestion.docx_parser import parse_docx
