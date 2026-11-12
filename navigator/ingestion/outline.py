@@ -55,7 +55,10 @@ class Outline:
         if point:
             section = point.group(1)
             depth = section.count(".") + 1
-            if depth == 1 and len(text) <= 100 and not text.rstrip().endswith((".", ";", ":", ",")):
+            # A numbered enumeration is content even if its short label looks
+            # like a section title. Do not replace context with each list item.
+            enumeration = bool(re.match(r"^\d+\)\s", text))
+            if not enumeration and depth == 1 and len(text) <= 100 and not text.rstrip().endswith((".", ";", ":", ",")):
                 self.sub = text
                 return Classified("heading", section, self.path)
             return Classified("paragraph", section, self.path)
