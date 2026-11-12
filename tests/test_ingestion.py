@@ -1,4 +1,5 @@
 """Тесты парсеров и разбиения. Все документы здесь искусственные, собираются на лету."""
+from datetime import date
 import pytest
 
 from navigator.ingestion import parse_file
@@ -221,3 +222,70 @@ def test_corrupted_pdf_gives_readable_error(tmp_path):
 
 def test_token_estimate_is_positive():
     assert estimate_tokens("а") >= 1
+
+
+# ---------- HTML & Metadata ----------
+
+def test_html_parsing_and_locators(tmp_path):
+    html_content = """<!DOCTYPE html>
+<html>
+<head><title>Регламент работы сервиса МФТИ</title></head>
+<body>
+    <nav><a href="/home">Главная</a></nav>
+    <main>
+        <h1>1. Общие положения</h1>
+        <p>1.1. Настоящий регламент регулирует порядок подачи заявок.</p>
+        <p>1.2. Дополнительные бланки можно скачать по ссылкам ниже:</p>
+        <p><a href="/files/form1.pdf">Скачать форму 1 (PDF)</a></p>
+        <p><a href="https://mipt.ru/docs/table.xlsx">Бланк сметы (XLSX)</a></p>
+        <table>
+            <tr><th>Услуга</th><th>Срок</th></tr>
+            <tr><td>Консультация</td><td>3 дня</td></tr>
+        </table>
+    </main>
+    <footer>Подвал сайта</footer>
+</body>
+</html>"""
+    path = tmp_path / "page.html"
+    path.write_text(html_content, encoding="utf-8")
+
+    parsed = parse_file(path, base_url="https://mipt.ru")
+    frags = fragments_of(parsed)
+
+    assert parsed.media_type == "html"
+    assert "Регламент" in parsed.title
+    assert not parsed.needs_review
+    assert all(f.locator.kind == "html" for f in frags)
+    assert all(isinstance(f.locator.block, int) for f in frags)
+    assert len(parsed.links) == 2
+    assert any(link["url"].endswith("form1.pdf") for link in parsed.links)
+    assert any(link["url"].endswith("table.xlsx") for link in parsed.links)
+    # Проверяем, что навигация и подвал не попали в блоки
+    all_texts = " ".join(f.text for f in frags)
+    assert "Главная" not in all_texts
+    assert "Подвал сайта" not in all_texts
+
+
+def test_metadata_extraction_order_and_relations():
+    from navigator.ingestion.common import Unit
+    from navigator.ingestion.metadata_extractor import extract_metadata
+
+    units = [
+        Unit(text="ПРИКАЗ от 28.03.2023 № 794-1", locator={"kind": "docx", "block": 0}),
+        Unit(text="О внесении изменений в приказ от 19.09.2019г. № 1469-1", locator={"kind": "docx", "block": 1}),
+        Unit(text="1. Отменить действие приказа от 19.09.2019г. № 1469-1 «О введении новых бланков».", locator={"kind": "docx", "block": 2}, section="1"),
+        Unit(text="2. Утвердить новый Регламент согласно Приложению № 1.", locator={"kind": "docx", "block": 3}, section="2"),
+    ]
+    meta = extract_metadata(units, filename="Приказ N 794-1 от 28.03.2023.docx")
+
+    assert meta.number == "794-1"
+    assert meta.issued == date(2023, 3, 28)
+    assert meta.valid_from == date(2023, 3, 28)
+    assert meta.reviewed is False
+    assert meta.relations is not None
+    kinds = {r.kind for r in meta.relations}
+    targets = {r.target_id for r in meta.relations}
+    assert "amends" in kinds
+    assert "repeals" in kinds
+    assert "1469-1" in targets
+    assert all(r.confirmed is False for r in meta.relations)
