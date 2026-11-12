@@ -235,6 +235,7 @@ curl -fsS http://127.0.0.1:8000/api/jobs/<job_id>
 - [Методика и метрики](docs/qa/README.md).
 - [Протокол A100 / 3060 Ti](docs/qa/machine-runbook.md).
 - [Чек-лист интерфейса](docs/qa/interface-checklist.md).
+- [Отчёт по веб-интерфейсу и план](docs/web-ui-report.md).
 - [Таблица результатов](docs/results.md) и [CSV-шаблон](docs/results.csv).
 
 ```bash
