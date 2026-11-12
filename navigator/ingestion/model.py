@@ -19,7 +19,14 @@ class Parsed:
     metadata: MetadataPatch | None = None
     links: list[dict] = field(default_factory=list)  # ссылки на скачиваемые документы
 
+    diagnostics: list[dict] = field(default_factory=list)
+
     def build(self) -> list[FragmentDraft]:
         if self.drafts is None:
             self.drafts = build_fragments(self.units)
+            for draft in self.drafts:
+                for warning in draft.warnings:
+                    self.needs_review = True
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
         return self.drafts

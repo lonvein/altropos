@@ -47,6 +47,8 @@ class Unit:
     table_header: str = ""  # шапка таблицы, повторяется при делении
     rows: list[str] | None = None  # для таблиц: строки без шапки
     row_locators: list[dict] | None = None  # локатор каждой строки (XLSX: диапазон ячеек)
+    note_refs: tuple[str, ...] = ()  # explicit source markers
+    note_id: str = ""
 
 
 @dataclass
@@ -131,7 +133,7 @@ def merge_locators(locators: list[dict]) -> dict:
     return first
 
 
-def build_fragments(units: list[Unit]) -> list[FragmentDraft]:
+def _build_fragments(units: list[Unit]) -> list[FragmentDraft]:
     """Упаковывает Unit в черновики фрагментов. Порядок сохраняется.
 
     Правила: цепочка заголовков (path) добавляется первой строкой каждого фрагмента;
@@ -194,6 +196,32 @@ def build_fragments(units: list[Unit]) -> list[FragmentDraft]:
         buffer.append((index, unit))
     flush()
     return drafts
+
+
+def build_fragments(units: list[Unit]) -> list[FragmentDraft]:
+    """Keep explicitly linked notes beside their grounds, including split tables."""
+    drafts = _build_fragments(units)
+    notes = {u.note_id: (i, u) for i, u in enumerate(units) if u.note_id}
+    result = []
+    for draft in drafts:
+        grounds = draft.units + [i for i, unit in enumerate(units)
+                                  if unit.kind == "heading" and unit.text in draft.text]
+        refs = dict.fromkeys(ref for i in grounds for ref in units[i].note_refs)
+        linked = [notes[ref] for ref in refs if ref in notes and notes[ref][0] not in draft.units]
+        if not linked:
+            result.append(draft)
+            continue
+        suffix = "\n" + "\n".join(u.text for _, u in linked)
+        indices = draft.units + [i for i, _ in linked]
+        if len(suffix) >= MAX_CHARS - 200:
+            draft.warnings.append("Сноска слишком велика для совместного фрагмента; см. отдельную сноску")
+            result.append(draft)
+            continue
+        for piece in _split_long_text(draft.text, reserve=len(suffix)):
+            result.append(FragmentDraft(text=piece+suffix, section=draft.section,
+                                        locator=draft.locator.copy(), units=indices,
+                                        warnings=list(draft.warnings)))
+    return result
 
 
 def _table_drafts(index: int, unit: Unit) -> list[FragmentDraft]:
