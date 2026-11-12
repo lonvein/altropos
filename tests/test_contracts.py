@@ -66,6 +66,25 @@ def test_embedding_valid():
     assert s.EmbeddingResponse(fingerprint="demo", vectors=[[1.0] + [0.0]*1023]).normalized
 
 
+@pytest.mark.parametrize("field,flag", [("llm_revision", "llm_enabled"),
+                                        ("reranker_revision", "ml_enabled"),
+                                        ("embedding_revision", "ml_enabled")])
+@pytest.mark.parametrize("revision", ["", "   ", "\t\n", "UNVERIFIED", " unverified "])
+def test_enabled_models_require_nonblank_pinned_revisions(field, flag, revision):
+    values = dict(llm_revision="synthetic-llm-v1", reranker_revision="synthetic-reranker-v1",
+                  embedding_revision="synthetic-embedding-v1")
+    values.update({flag: True, field: revision})
+    with pytest.raises(ValidationError, match="Pin .* revision"):
+        Settings(_env_file=None, **values)
+
+
+def test_synthetic_revision_labels_remain_supported():
+    config = Settings(_env_file=None, llm_enabled=True, ml_enabled=True,
+                      llm_revision="synthetic-v1", reranker_revision="synthetic-v1",
+                      embedding_revision="synthetic-v1")
+    assert config.fingerprint.endswith("@synthetic-v1:1024:normalized")
+
+
 def test_response_requires_verified_sources():
     example = next(json.loads(p) for n, p in EXAMPLES if n == "AskResponse")
     for patch in ({"sources": []}, {"verification": None}, {"status": "answered"},

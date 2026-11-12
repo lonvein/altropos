@@ -72,6 +72,7 @@ sort_keys=True, ensure_ascii=False, separators=(',', ':'). Реализация 
 | RerankerClient.rerank | RerankRequest → RerankResponse | Каждый входной ID ровно один раз; ID уникальны; фиксированная ревизия |
 | LLMClient.generate | GenerationRequest → Draft | Контекст/выход по профилю; корректный JSON |
 | LLMClient.verify | VerificationRequest → Verification | Отдельный последовательный вызов; поддержка, полнота, конфликты |
+| LLMClient.repair | VerificationRequest + issues → Draft | Единственное исправление; затем повторные проверки цитат и смысла |
 
 EmbeddingResponse: конечные числа, 1024 координаты, L2-норма с допуском 0.01 по
 квадрату нормы. Batch от 1 до 64. Reranker принимает от 1 до 40 фрагментов.

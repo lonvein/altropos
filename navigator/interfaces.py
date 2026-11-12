@@ -1,5 +1,6 @@
 """Dependency seams; implementations belong to subsequent feature branches."""
 from typing import Protocol
+from contextlib import AbstractAsyncContextManager
 
 from navigator.schemas import (
     Draft, EmbeddingRequest, EmbeddingResponse, ErrorDetail, Fragment, GenerationRequest,
@@ -31,6 +32,10 @@ class RerankerClient(Protocol):
 
 
 class LLMClient(Protocol):
+    def sequence(self) -> AbstractAsyncContextManager: ...
+
     async def generate(self, request: GenerationRequest) -> Draft: ...
 
     async def verify(self, request: VerificationRequest) -> Verification: ...
+
+    async def repair(self, request: VerificationRequest, issues: list[str]) -> Draft: ...

@@ -56,10 +56,15 @@ class Settings(BaseSettings):
             raise ValueError("Thinking mode is disabled in all supported profiles")
         if self.context_budget + self.max_output_tokens + self.prompt_reserve_tokens > self.context_size:
             raise ValueError("Sources + output + prompt reserve exceed context size")
-        if self.llm_enabled and self.llm_revision == "UNVERIFIED":
+        def pinned(revision):
+            return bool(revision.strip()) and revision.strip().upper() != "UNVERIFIED"
+
+        if self.llm_enabled and not pinned(self.llm_revision):
             raise ValueError("Pin LLM revision before enabling it")
-        if self.ml_enabled and self.reranker_revision == "UNVERIFIED":
+        if self.ml_enabled and not pinned(self.reranker_revision):
             raise ValueError("Pin reranker revision before enabling ML")
+        if self.ml_enabled and not pinned(self.embedding_revision):
+            raise ValueError("Pin embedding revision before enabling ML")
         return self
 
     @property

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from navigator.ingestion.common import FragmentDraft, Unit, build_fragments
+from navigator.schemas import MetadataPatch
 
 
 @dataclass
@@ -15,6 +16,8 @@ class Parsed:
     warnings: list[str] = field(default_factory=list)
     needs_review: bool = False  # нечитаемый OCR, пустой документ и т.п.
     drafts: list[FragmentDraft] | None = None
+    metadata: MetadataPatch | None = None
+    links: list[dict] = field(default_factory=list)  # ссылки на скачиваемые документы
 
     def build(self) -> list[FragmentDraft]:
         if self.drafts is None:

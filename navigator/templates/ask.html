@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}Задать вопрос · Altropos{% endblock %}
+
+{% block content %}
+<div class="page-grid page-grid--ask">
+  <section class="panel panel--form" aria-labelledby="ask-title">
+    <div class="panel__header">
+      <p class="eyebrow">Проверяемые ответы</p>
+      <h1 id="ask-title">Задать вопрос по регламентам</h1>
+      <p class="lead">
+        Ответ будет собран из найденных документов. У каждого вывода — ссылка на
+        подтверждение и дословную цитату. Частичный ответ не считается полной инструкцией.
+      </p>
+    </div>
+
+    <form id="ask-form" class="ask-form" novalidate
+          data-timeout-seconds="{{ ask_timeout_seconds }}"
+          data-max-question="{{ max_question_length }}">
+      <div class="field">
+        <label for="question">Вопрос</label>
+        <textarea id="question" name="question" rows="5" maxlength="{{ max_question_length }}"
+                  minlength="3" required placeholder="Например: как направить учебную заявку?"
+                  aria-describedby="question-hint"></textarea>
+        <p id="question-hint" class="field__hint">
+          Не менее 3 символов. Вопрос сохраняется при ошибке или тайм-ауте.
+        </p>
+      </div>
+
+      <div class="field field--date">
+        <label for="as-of">Дата применимости <span class="optional">необязательно</span></label>
+        <input type="date" id="as-of" name="as_of" aria-describedby="as-of-hint">
+        <p id="as-of-hint" class="field__hint">
+          Если не указана, сервер использует текущую дату приложения.
+        </p>
+      </div>
+
+      <p id="ask-field-error" class="field-error" role="alert" hidden></p>
+
+      <div class="form-actions">
+        <button type="submit" class="button button--primary" id="ask-submit">
+          <span class="button__label">Найти ответ</span>
+          <span class="spinner" aria-hidden="true" hidden></span>
+        </button>
+        <button type="button" class="button button--ghost" id="ask-clear">Очистить</button>
+        <span id="ask-state" class="form-state" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+
+    {% if integration.ask.mode == 'synthetic' %}
+    <details class="demo-hint">
+      <summary>Демонстрационная заглушка: как проверить статусы</summary>
+      <p>Ответ искусственный. Для проверки интерфейса используйте слова в вопросе:</p>
+      <ul>
+        <li><strong>частич</strong> — частичный ответ;</li>
+        <li><strong>конфликт</strong> — противоречие источников;</li>
+        <li><strong>уточн</strong> — нужен уточняющий вопрос;</li>
+        <li><strong>нет ответа</strong> — информация не найдена;</li>
+        <li><strong>недоступ</strong> — сервис недоступен;</li>
+        <li>любой другой вопрос — полный демонстрационный ответ.</li>
+      </ul>
+    </details>
+    {% endif %}
+  </section>
+
+  <section class="panel panel--answer" aria-labelledby="answer-panel-title">
+    <div class="panel__header panel__header--compact">
+      <h2 id="answer-panel-title">Ответ</h2>
+      <p class="muted">Здесь появятся выводы, шаги и ссылки на источники.</p>
+    </div>
+
+    <div id="ask-request-error" class="callout callout--error" role="alert" hidden>
+      <h2>Не удалось получить ответ</h2>
+      <p id="ask-request-error-text"></p>
+      <p class="muted">Введённый вопрос сохранён. Повторная отправка выполняется только вручную.</p>
+    </div>
+
+    <section id="answer-region" class="answer-region" aria-live="polite" hidden>
+      <div id="answer-status" class="status-banner" role="status">
+        <span id="answer-status-badge" class="badge"></span>
+        <div class="status-banner__body">
+          <h2 id="answer-status-title"></h2>
+          <p id="answer-status-description"></p>
+        </div>
+      </div>
+
+      <div id="clarification-panel" class="callout callout--info" hidden>
+        <h2>Нужно уточнение</h2>
+        <p id="clarification-text"></p>
+      </div>
+
+      <section id="warnings-panel" class="callout callout--warning" aria-labelledby="warnings-title" hidden>
+        <h2 id="warnings-title">Предупреждения</h2>
+        <ul id="warnings-list" class="plain-list"></ul>
+      </section>
+
+      <section id="summary-section" class="answer-section" aria-labelledby="summary-title" hidden>
+        <h2 id="summary-title">Краткий ответ</h2>
+        <ol id="summary-list" class="claim-list"></ol>
+      </section>
+
+      <section id="steps-section" class="answer-section" aria-labelledby="steps-title" hidden>
+        <h2 id="steps-title">Шаги</h2>
+        <ol id="steps-list" class="claim-list claim-list--steps"></ol>
+      </section>
+
+      <section id="sources-section" class="answer-section" aria-labelledby="sources-title" hidden>
+        <h2 id="sources-title">Источники</h2>
+        <ul id="sources-list" class="source-list"></ul>
+      </section>
+
+      <details id="answer-meta" class="meta-details" hidden>
+        <summary>Технические сведения об ответе</summary>
+        <dl class="meta-list">
+          <div><dt>Поиск</dt><dd id="meta-mode">—</dd></div>
+          <div><dt>Тип ответа</dt><dd id="meta-answer-mode">—</dd></div>
+          <div><dt>Проверка</dt><dd id="meta-verification">—</dd></div>
+          <div><dt>Время</dt><dd id="meta-timings">—</dd></div>
+        </dl>
+        <p class="muted">
+          Технические оценки релевантности не показываются как вероятность правильности.
+        </p>
+      </details>
+    </section>
+  </section>
+</div>
+
+<section class="panel panel--legend" aria-labelledby="status-legend-title">
+  <details class="status-legend">
+    <summary id="status-legend-title">Какие бывают статусы ответа</summary>
+    <ul class="legend-list">
+      <li><span class="badge status-answered">Полный ответ</span><span>Утверждения подтверждены, полнота проверена.</span></li>
+      <li><span class="badge status-partial">Частичный ответ</span><span>Есть подтверждённые выводы, но это не полная инструкция.</span></li>
+      <li><span class="badge status-not_found">Информация не найдена</span><span>В доступных документах недостаточно оснований.</span></li>
+      <li><span class="badge status-ambiguous">Нужно уточнение</span><span>Вопрос допускает разные толкования.</span></li>
+      <li><span class="badge status-conflict">Противоречие</span><span>Источники противоречат друг другу; вывод не окончательный.</span></li>
+      <li><span class="badge status-unavailable">Ответ недоступен</span><span>Сервис не смог подготовить результат; причина в предупреждениях.</span></li>
+    </ul>
+  </details>
+</section>
+
+<dialog id="source-dialog" class="dialog dialog--source" aria-labelledby="source-title">
+  <div class="dialog__header">
+    <div>
+      <p class="eyebrow">Подтверждение</p>
+      <h2 id="source-title">Источник</h2>
+      <p id="source-locator" class="muted"></p>
+    </div>
+    <button type="button" class="icon-button" data-close-dialog aria-label="Закрыть">×</button>
+  </div>
+
+  <blockquote id="source-quote" class="quote"></blockquote>
+
+  <p class="muted">
+    HTML-представление показывает сохранённый источник с выделенным фрагментом.
+    Если оно не загрузилось, откройте оригинал.
+  </p>
+
+  <div class="dialog__actions dialog__actions--start">
+    <a id="source-original" class="button button--secondary" target="_blank" rel="noopener" hidden>Открыть оригинал</a>
+    <a id="source-new-tab" class="button button--ghost" target="_blank" rel="noopener" hidden>Открыть представление</a>
+  </div>
+
+  <p id="source-message" class="field-error" role="alert" hidden></p>
+  <div class="source-frame-wrap">
+    <iframe id="source-frame" class="source-frame" title="HTML-представление источника"
+            sandbox="" referrerpolicy="no-referrer" hidden></iframe>
+  </div>
+
+  <div class="dialog__actions">
+    <button type="button" class="button button--primary" data-close-dialog>Закрыть</button>
+  </div>
+</dialog>
+
+<template id="claim-template">
+  <li class="claim">
+    <div class="claim__head">
+      <span class="claim__number" aria-hidden="true"></span>
+      <p class="claim__text"></p>
+    </div>
+    <div class="claim__evidence"></div>
+  </li>
+</template>
+
+<template id="evidence-template">
+  <button type="button" class="evidence-button">
+    <span class="evidence-button__icon" aria-hidden="true">§</span>
+    <span class="evidence-button__text"></span>
+  </button>
+</template>
+
+<template id="warning-template">
+  <li></li>
+</template>
+
+<template id="source-template">
+  <li class="source-item">
+    <div class="source-item__main">
+      <h3 class="source-item__title"></h3>
+      <p class="source-item__locator muted"></p>
+    </div>
+    <button type="button" class="button button--secondary source-item__button">Открыть источник</button>
+  </li>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/ask.js" defer></script>
+{% endblock %}

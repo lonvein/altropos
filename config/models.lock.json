@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "updated": "2026-11-12",
+  "note": "Revision and checksum lock for weights. Verify with Klim before a release; actual hardware runs are recorded in docs/verification.md.",
+  "llama_cpp": {
+    "build": "b5350",
+    "cpu_image": "ghcr.io/ggml-org/llama.cpp:server-b5350@sha256:8a0a31d0b342f96b2c5453eedadbb0544d6d426bd43c9ea6f62b2bd2489be676",
+    "cuda_image": "ghcr.io/ggml-org/llama.cpp:server-cuda-b5350@sha256:2fb552ce5860b0e61529bc77a15ecbf40b2169abbda130d4257fadea05037ac4"
+  },
+  "profiles": {
+    "a100": {
+      "repo": "Qwen/Qwen2.5-14B-Instruct-GGUF",
+      "revision": "b466e1f8c07172155743e8e1307507d8a4f91fbd",
+      "quantization": "Q4_K_M",
+      "model_alias": "Qwen2.5-14B-Instruct-GGUF-Q4_K_M",
+      "first_shard": "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",
+      "files": {
+        "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf": "a09ea5e7b1eafb1b30b241726c3cc3c905c96f14ad41e246ffa5f44e53904f68",
+        "qwen2.5-14b-instruct-q4_k_m-00002-of-00003.gguf": "21b9457d079680d284e90ef69607c4b2d8ef64a09d4729cb7b5e1357bdba41ae",
+        "qwen2.5-14b-instruct-q4_k_m-00003-of-00003.gguf": "c8d37006760a387a35216e070e6664d7da927f10be8eb870fef2e3d4833d9976"
+      },
+      "download_gib": 8.38
+    },
+    "3060ti": {
+      "repo": "Qwen/Qwen3-8B-GGUF",
+      "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "quantization": "Q4_K_M",
+      "model_alias": "Qwen3-8B-GGUF-Q4_K_M",
+      "first_shard": "Qwen3-8B-Q4_K_M.gguf",
+      "files": {
+        "Qwen3-8B-Q4_K_M.gguf": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"
+      },
+      "download_gib": 4.68
+    },
+    "4b": {
+      "repo": "Qwen/Qwen3-4B-GGUF",
+      "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "quantization": "Q4_K_M",
+      "model_alias": "Qwen3-4B-GGUF-Q4_K_M",
+      "first_shard": "Qwen3-4B-Q4_K_M.gguf",
+      "files": {
+        "Qwen3-4B-Q4_K_M.gguf": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
+      },
+      "download_gib": 2.33
+    }
+  },
+  "ml": {
+    "embedding": {
+      "repo": "BAAI/bge-m3",
+      "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+      "dimension": 1024,
+      "normalized": true,
+      "files": {
+        "pytorch_model.bin": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38"
+      }
+    },
+    "reranker": {
+      "repo": "BAAI/bge-reranker-v2-m3",
+      "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "files": {
+        "model.safetensors": "d9e3e081faff1eefb84019509b2f5558fd74c1a05a2c7db22f74174fcedb5286"
+      }
+    }
+  }
+}

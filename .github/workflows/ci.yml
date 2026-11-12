@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python tests (synthetic, no GPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest -q
+
+  compose-config:
+    name: Compose profiles validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate base and profile interpolation
+        run: |
+          cp .env.example .env
+          for profile in development 4b 3060ti a100; do
+            echo "== $profile"
+            docker compose \
+              --env-file .env \
+              --env-file "config/profiles/$profile.env" \
+              -f docker-compose.yml config --quiet
+          done
+          docker compose --env-file .env --env-file config/profiles/a100.env \
+            -f docker-compose.yml -f compose.a100.yml config --quiet
+          docker compose --env-file .env --env-file config/profiles/3060ti.env \
+            -f docker-compose.yml -f compose.3060ti.yml config --quiet
+
+  app-smoke:
+    name: App image + restart persistence
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application image
+        run: docker build -t altropos-app:ci .
+      - name: Start without model services
+        run: |
+          docker volume create altropos-ci-runtime
+          docker run -d --name altropos-ci \
+            -p 127.0.0.1:18000:8000 \
+            -e PROFILE=development \
+            -e LLM_ENABLED=false \
+            -e ML_ENABLED=false \
+            -e DATA_DIR=/data/runtime \
+            -e UI_SYNTHETIC_FALLBACK=true \
+            -v altropos-ci-runtime:/data/runtime \
+            altropos-app:ci
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18000/health >/tmp/health.json; then break; fi
+            sleep 2
+          done
+          cat /tmp/health.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/health.json", encoding="utf-8") as stream:
+              health = json.load(stream)
+          assert health["profile"] == "development", health
+          assert health.get("status"), health
+          PY
+          curl -fsS http://127.0.0.1:18000/ | grep -q 'Altropos'
+      - name: Verify data survives restart
+        run: |
+          docker exec altropos-ci sh -c 'printf "ci-marker" > /data/runtime/ci-marker'
+          docker restart altropos-ci >/dev/null
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18000/health >/dev/null; then break; fi
+            sleep 2
+          done
+          test "$(docker exec altropos-ci cat /data/runtime/ci-marker)" = "ci-marker"
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs altropos-ci || true
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f altropos-ci || true
+          docker volume rm altropos-ci-runtime || true

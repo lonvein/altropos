@@ -1,0 +1,3 @@
+-r requirements-contracts.txt
+-r requirements-app.txt
+PyYAML==6.0.3

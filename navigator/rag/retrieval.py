@@ -60,7 +60,9 @@ def _visible(snapshots, as_of, warnings):
             warnings.append(f"Период действия {manifest.document_id} подтверждён не полностью.")
         eligible[manifest.document_id] = (manifest, fragments, meta)
     excluded = {}
-    for manifest, fragments, meta in eligible.values():
+    # A repeal is an effective event, not a temporary property of the repealer's
+    # current validity window. Expiry of the repealer does not revive its target.
+    for manifest, fragments, meta in snapshots:
         for relation in meta.relations or []:
             if not relation.confirmed:
                 warnings.append("Есть неподтверждённые связи редакций; выбор редакции требует проверки.")
@@ -70,8 +72,10 @@ def _visible(snapshots, as_of, warnings):
                 if not meta.reviewed or meta.valid_from is None:
                     warnings.append("Дата вступления отмены в силу не подтверждена.")
                     continue
+                if as_of < meta.valid_from:
+                    continue
                 excluded.setdefault(relation.target_id, []).append(relation.target_section)
-            elif relation.kind == "amends":
+            elif relation.kind == "amends" and manifest.document_id in eligible:
                 warnings.append("Есть подтверждённая поправка; исходный документ сохранён вместе с ней.")
     visible = []
     for doc_id, (manifest, fragments, meta) in eligible.items():

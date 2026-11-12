@@ -1,4 +1,5 @@
 .venv/
+.venv-*/
 __pycache__/
 .pytest_cache/
 .env
@@ -9,7 +10,9 @@ __pycache__/
 *.key
 runtime/
 models/
+backups/
 artifacts/
+docs/demo/recordings/
 *.pyc
 *.sqlite*
 Данные/

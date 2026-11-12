@@ -1,0 +1,20 @@
+# A100 override: LLM and BGE embeddings/reranker both use the GPU.
+# Applied by scripts/start.sh after docker-compose.yml.
+services:
+  llm:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  embeddings-reranker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

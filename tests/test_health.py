@@ -1,0 +1,44 @@
+"""Smoke test for the application shell, without models or network."""
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE", "development")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    monkeypatch.setenv("ML_ENABLED", "false")
+
+    from navigator.config import get_settings
+
+    get_settings.cache_clear()
+    from navigator.main import create_app
+
+    app = create_app(synthetic_fallback=True)
+    with TestClient(app) as test_client:
+        yield test_client
+    get_settings.cache_clear()
+
+
+def test_health_reports_profile_and_limited_mode(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["profile"] == "development"
+    assert data["status"] in {"ok", "limited", "degraded"}
+    assert data["ml"]["status"] == "disabled"
+    assert data["llm"]["status"] == "disabled"
+    assert data["reasons"]
+
+
+def test_pages_render_without_model_services(client):
+    for path in ("/", "/documents"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert "text/html" in response.headers["content-type"]
+        assert "Altropos" in response.text
+    health = client.get("/health")
+    assert "application/json" in health.headers["content-type"]
