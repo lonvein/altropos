@@ -12,7 +12,7 @@ from html import escape
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from navigator.documents.service import DocumentService
+from navigator.documents.service import DocumentService, InitialCorpusReviewRequired
 from navigator.ingestion.common import ParseError
 from navigator.schemas import Fragment, MetadataPatch
 
@@ -51,6 +51,8 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
             # Bound memory even when Content-Length is absent or untrusted.
             content = await file.read(svc.storage.max_bytes + 1)
             return await asyncio.to_thread(svc.upload_file, file.filename or "", content)
+        except InitialCorpusReviewRequired:
+            return _error("not_ready", "Стартовый документ добавляется после одобрения распознанного пакета.", 409)
         except (ParseError, ValueError):
             return _error("invalid_request", "Проверьте формат, имя и размер файла.", 422)
         finally:
@@ -59,6 +61,16 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
     @api.get("/documents")
     def documents(request: Request):
         return {"documents": [public_document(d) for d in current(request).list_documents()]}
+
+    @api.post("/documents/{document_id}/retry")
+    def retry(request: Request, document_id: str):
+        svc = current(request)
+        if svc.get_document(document_id) is None:
+            return _error("not_found", "Документ не найден.", 404)
+        try:
+            return svc.retry_document(document_id)
+        except ValueError:
+            return _error("not_ready", "Документ уже обрабатывается или опубликован.", 409)
 
     @api.get("/jobs")
     def jobs(request: Request):

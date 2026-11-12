@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=90.0, gt=0)
     max_upload_mb: int = Field(default=40, gt=0)
     job_timeout: int = Field(default=300, gt=0)
+    tesseract_cmd: Path | None = None
+    tessdata_prefix: Path | None = None
+    review_dir: Path = Path("runtime/corpus-review")
+    corpus_manifest: Path | None = None
     # A deployment with uncalibrated scores is explicitly marked in every answer.
     threshold_calibrated: bool = False
 

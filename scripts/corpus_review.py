@@ -17,10 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from navigator.review import (  # noqa: E402
     prepare_document, record_decision, show_package, write_index,
 )
+from navigator.config import Settings
+from navigator.corpus import ocr_environment
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--env-file", type=Path, default=Path(".env"))
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("prepare")
     prepare.add_argument("sources", type=Path, nargs="+")
@@ -34,6 +37,12 @@ def main(argv=None):
     decision.add_argument("--reviewer", required=True)
     decision.add_argument("--comment", default="")
     args = parser.parse_args(argv)
+    with ocr_environment(Settings(_env_file=args.env_file)):
+        result = execute(args)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def execute(args):
     if args.command == "prepare":
         result = [prepare_document(path, args.out, group=args.group) for path in args.sources]
         write_index(args.out)
@@ -42,7 +51,7 @@ def main(argv=None):
     else:
         result = record_decision(args.package, args.decision, reviewer=args.reviewer, comment=args.comment)
         write_index(args.package.parent)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
 
 
 if __name__ == "__main__":

@@ -72,7 +72,7 @@ def parser_fingerprint():
         sorted(Path(data).glob("*.traineddata")) if data else []
     ):
         assets[str(path.resolve())] = _sha(path.read_bytes())
-    return {"code": {str(p.relative_to(root)): _sha(p.read_bytes()) for p in files},
+    return {"code": {str(p.relative_to(root)): _sha(p.read_bytes().replace(b"\r\n", b"\n")) for p in files},
             "libraries": versions, "ocr_assets": assets,
             "ocr_environment": {key: os.environ.get(key) for key in
                                 ("TESSERACT_CMD", "TESSDATA_PREFIX")}}
@@ -317,12 +317,17 @@ def write_index(out_root: Path) -> Path:
     rows = []
     for path in sorted(root.glob("*/review.json")):
         info = show_package(path.parent)
+        document = info["manifest"]["document"]
+        technical = ("требуется исправление перед одобрением" if document["status"] == "needs_review"
+                     else "ожидает проверки человеком")
         rows.append(f'<li><a href="{_escape(path.parent.name)}/index.html">'
                     f'{_escape(info["manifest"]["source_name"])}</a> — '
                     f'{_escape(info["review"]["status"])}; '
-                    f'{_escape(info["manifest"]["group"])}</li>')
+                    f'{_escape(info["manifest"]["group"])}; {technical}</li>')
     target = root / "index.html"
     target.write_text("<!doctype html><html><head>" + _STYLE +
-                      "<title>Корпус для проверки</title></head><body><h1>Корпус для проверки</h1><ul>" +
+                      "<title>Корпус для проверки</title></head><body><h1>Корпус для проверки</h1>"
+                      "<p>Пакеты ещё не добавлены в поиск. initial — стартовые документы; "
+                      "manual_test — отложенные для ручной загрузки. pending — решение не принято.</p><ul>" +
                       "".join(rows) + "</ul></body></html>", encoding="utf-8")
     return target

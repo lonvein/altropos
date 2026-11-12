@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from pathlib import Path
 
 from openpyxl.utils import get_column_letter
@@ -18,6 +19,8 @@ MAX_CELLS = 2_000_000  # защита от «раздутых» листов
 
 
 def _fmt(value) -> str:
+    if value is None:
+        return ""
     if isinstance(value, bool):
         return "да" if value else "нет"
     if isinstance(value, float):
@@ -52,13 +55,19 @@ def parse_xlsx(path: Path) -> Parsed:
     warnings: list[str] = []
     blocks: list[dict] = []
     title = Path(path).stem
+    incomplete = False
 
     for ws in wb_formulas.worksheets:
         values_ws = wb_values[ws.title]
-        if ws.max_row * ws.max_column > MAX_CELLS:
-            warnings.append(f"Лист «{ws.title}» слишком большой ({ws.dimensions}), разобрана только часть")
+        row_limit = min(ws.max_row, 20000)
+        col_limit = min(ws.max_column, max(1, MAX_CELLS // max(1, row_limit)))
+        if ws.max_row > row_limit or ws.max_column > col_limit:
+            incomplete = True
+            warnings.append(f"Лист «{ws.title}»: обработка ограничена {row_limit} строками и "
+                            f"{col_limit} столбцами из {ws.dimensions}; требуется проверка")
         rows: list[tuple[int, list[tuple[int, str, str | None]]]] = []  # row, [(col, formula_or_value, cached)]
-        for row in ws.iter_rows(max_row=min(ws.max_row, 20000)):
+        blank_rows = []
+        for row in ws.iter_rows(max_row=row_limit, max_col=col_limit):
             cells = []
             for cell in row:
                 if cell.value is None or (isinstance(cell.value, str) and not cell.value.strip()):
@@ -67,15 +76,13 @@ def parse_xlsx(path: Path) -> Parsed:
                 cells.append((cell.column, cell.value, cached))
             if cells:
                 rows.append((row[0].row, cells))
-        blocks.append({"sheet": ws.title, "dimensions": ws.dimensions,
-                       "state": ws.sheet_state, "rows": [
-                           {"row": r, "cells": [{"col": c, "ref": f"{get_column_letter(c)}{r}",
-                                                 "text": _fmt(v) if not _is_formula(v) else None,
-                                                 "formula": v if _is_formula(v) else None,
-                                                 "cached": None if cv is None else _fmt(cv)}
-                                                for c, v, cv in cells]} for r, cells in rows]})
+            else:
+                blank_rows.append(row[0].row)
         if not rows:
             warnings.append(f"Лист «{ws.title}» пустой")
+            blocks.append({"sheet": ws.title, "dimensions": ws.dimensions,
+                           "state": ws.sheet_state, "rows": [], "blank_rows": blank_rows,
+                           "merged_ranges": [str(m) for m in ws.merged_cells.ranges]})
             continue
 
         # Шапка таблицы: первая строка с >=3 непустыми текстовыми ячейками без формул.
@@ -89,6 +96,37 @@ def parse_xlsx(path: Path) -> Parsed:
         if header_idx is not None:
             headers = {c: _fmt(v) for c, v, _ in rows[header_idx][1]}
 
+        # Keep gaps and the complete header span. A blank is not zero and an
+        # anonymized literal must never be replaced by an inferred real value.
+        expanded = []
+        for index, (row_no, cells) in enumerate(rows):
+            by_col = {c: (v, cv) for c, v, cv in cells}
+            c0, c1 = min(by_col), max(by_col)
+            if header_idx is not None and index >= header_idx:
+                c0, c1 = min(c0, min(headers)), max(c1, max(headers))
+            expanded.append((row_no, [(c, *by_col.get(c, (None, None))) for c in range(c0, c1 + 1)]))
+        rows = expanded
+        merged = list(ws.merged_cells.ranges)
+
+        def cell_record(row_no, col, value, cached):
+            ref = f"{get_column_letter(col)}{row_no}"
+            anchor = next((f"{get_column_letter(m.min_col)}{m.min_row}" for m in merged
+                           if m.min_row <= row_no <= m.max_row and m.min_col <= col <= m.max_col
+                           and ref != f"{get_column_letter(m.min_col)}{m.min_row}"), None)
+            placeholder = isinstance(value, str) and re.fullmatch(
+                r"(?:[xхXХ*]{2,}|\[\s*(?:скрыто|обезличено)\s*\]|<[^<>]+>)", value.strip(), re.I)
+            state = ("merged" if anchor else "empty" if value is None else "formula" if _is_formula(value)
+                     else "placeholder" if placeholder else "value")
+            return {"col": col, "ref": ref, "state": state, "merged_from": anchor,
+                    "text": _fmt(value) if not _is_formula(value) else None,
+                    "formula": value if _is_formula(value) else None,
+                    "cached": None if cached is None else _fmt(cached)}
+
+        blocks.append({"sheet": ws.title, "dimensions": ws.dimensions, "state": ws.sheet_state,
+                       "merged_ranges": [str(m) for m in merged], "blank_rows": blank_rows,
+                       "rows": [{"row": r, "cells": [cell_record(r, c, v, cv) for c, v, cv in cells]}
+                                for r, cells in rows]})
+
         missing: list[str] = []
         sheet_path = (f"Лист «{ws.title}»",)
 
@@ -98,6 +136,12 @@ def parse_xlsx(path: Path) -> Parsed:
                 in_table = header_idx is not None and row_no > rows[header_idx][0]
                 key = headers.get(col) if in_table else None
                 label = key or get_column_letter(col)
+                if value is None:
+                    ref = f"{get_column_letter(col)}{row_no}"
+                    record = cell_record(row_no, col, value, cached)
+                    note = f"объединено с {record['merged_from']}" if record["merged_from"] else "нет значения"
+                    parts.append(f"{label} ({ref}): {note}")
+                    continue
                 if in_table and col == min(headers, default=col) and not _is_formula(value):
                     parts.append(_fmt(value))  # колонка с названием строки — без подписи
                     continue
@@ -139,5 +183,7 @@ def parse_xlsx(path: Path) -> Parsed:
 
     if not units:
         warnings.append("В книге не найдено данных")
+    wb_formulas.close()
+    wb_values.close()
     return Parsed(media_type="xlsx", title=title, units=units, blocks=blocks, warnings=warnings,
-                  needs_review=not units)
+                  needs_review=not units or incomplete)

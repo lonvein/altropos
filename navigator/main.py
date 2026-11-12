@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -177,6 +177,14 @@ def create_app(
 
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/review-files", StaticFiles(directory=str(settings.review_dir), check_dir=False), name="review-files")
+
+    @app.get("/review")
+    def review_page():
+        if not (settings.review_dir / "index.html").is_file():
+            return HTMLResponse("<meta charset='utf-8'><h1>Пакеты проверки ещё не подготовлены</h1>"
+                                "<p>До одобрения документы не публикуются в поиске.</p>")
+        return RedirectResponse("/review-files/index.html")
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -185,7 +193,7 @@ def create_app(
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         path = request.url.path
-        if path.startswith("/api/sources/"):
+        if path.startswith(("/api/sources/", "/review-files/", "/review")):
             response.headers.setdefault("Content-Security-Policy", SOURCE_CSP)
         elif response.headers.get("content-type", "").startswith("text/html"):
             response.headers.setdefault("Content-Security-Policy", PAGE_CSP)

@@ -192,6 +192,7 @@ Docker проверен, см. [docs/verification.md](docs/verification.md).
 | Endpoint | Назначение |
 |---|---|
 | `POST /api/documents` | multipart PDF/DOCX/XLSX → `document_id`, `job_id`, `status` |
+| `POST /api/documents/{id}/retry` | повтор OCR/обработки для `failed` и `needs_review` |
 | `POST /api/import-url` | `{url, selected_urls}` → `job_id`; только `mipt.ru` и поддомены |
 | `GET /api/jobs/{id}` | состояние, ошибка, результат |
 | `GET /api/documents` | список с метаданными и предупреждениями |
@@ -204,10 +205,15 @@ curl -fsS -F 'file=@document.pdf' http://127.0.0.1:8000/api/documents
 curl -fsS http://127.0.0.1:8000/api/jobs/<job_id>
 ```
 
-Состояния: `queued`, `processing`, `ready`, `needs_review`, `error`. В поиск
+Состояния: `queued`, `processing`, `ready`, `needs_review`, `failed`. В поиск
 попадают только `ready` после согласованной публикации фрагментов и индекса.
 `needs_review` исключён. Повторная загрузка того же SHA-256 возвращает существующий
 документ. Импорт сайта не обходит весь сайт и не подтверждает связи автоматически.
+
+Первичное наполнение корпуса проходит через [проверку распознавания](docs/ocr-review.md):
+локальный manifest разделяет стартовые и отложенные тестовые файлы. Пакеты видны
+на `/review`, но сами по себе не создают базу и не публикуют фрагменты. Импорт
+разрешён только после явных решений человека по каждому стартовому документу.
 
 ## Перенос базы
 

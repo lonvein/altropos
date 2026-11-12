@@ -192,8 +192,9 @@ def test_pdf_previews_rotation_side_by_side(tmp_path):
         load_approved_package(path)
 
 
-def test_cli_prepare_show_and_explicit_decision(tmp_path, capsys):
+def test_cli_prepare_show_and_explicit_decision(tmp_path, capsys, monkeypatch):
     from scripts.corpus_review import main
+    monkeypatch.chdir(tmp_path)
     source = tmp_path / "synthetic.html"
     source.write_text("<html><body><p>Artificial review document for testing.</p></body></html>", encoding="utf-8")
     root = tmp_path / "review"
