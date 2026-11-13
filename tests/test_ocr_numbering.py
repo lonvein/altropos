@@ -150,3 +150,73 @@ def test_uncertain_hollow_marker_is_preserved_and_requires_review(layout):
     assert any(g['text'].startswith('a Synthetic condition 1') for g in groups)
     assert diag['needs_review']
     assert any('маркер' in warning for warning in diag['warnings'])
+
+def inline_fixture(label='|', shape='digit'):
+    image = Image.new('RGB',(600,300),'white')
+    draw = ImageDraw.Draw(image)
+    if shape == 'digit':
+        draw.polygon([(200,110),(213,100),(218,100),(218,166),(224,166),(224,171),
+                      (204,171),(204,166),(211,166),(211,110),(200,115)],fill='black')
+    elif shape == 'bar':
+        draw.rectangle((211,100,217,171),fill='black')
+    else:
+        draw.rectangle((211,100,217,171),fill='black')
+        draw.rectangle((200,100,224,105),fill='black')
+        draw.rectangle((200,166,224,171),fill='black')
+    paragraphs = {(1,1):paragraph([word('Allocate',50,100,100,72),word(label,200,100,25,72),
+                                   word('units.',260,100,180,72)])}
+    return image,paragraphs
+
+
+@pytest.mark.parametrize('label',['|','I','l'])
+def test_inline_digit_requires_geometry_and_two_unrestricted_reads(label):
+    image, paragraphs = inline_fixture(label)
+    diag = {'needs_review':False,'warnings':[]}
+    reads = []
+    def unrestricted(crop,psm):
+        reads.append(psm)
+        return '1',95
+    groups = _layout_groups(paragraphs,image,lambda *a: pytest.fail('no digit whitelist'),diag,unrestricted)
+    assert groups[0]['text'] == 'Allocate 1 units.'
+    assert groups[0]['raw_text'] == f'Allocate {label} units.'
+    assert groups[0]['layout_corrections'][0]['kind'] == 'inline_number'
+    assert len(reads) == 2 and not diag['needs_review']
+
+
+@pytest.mark.parametrize('readings',[[('1',95),('2',95)],[('1',84),('1',95)],[('|',99),('|',99)]])
+def test_uncertain_inline_digit_is_not_guessed(readings):
+    image, paragraphs = inline_fixture()
+    answers = iter(readings)
+    diag = {'needs_review':False,'warnings':[]}
+    groups = _layout_groups(paragraphs,image,lambda *a: ('',0),diag,lambda *a: next(answers))
+    assert groups[0]['text'] == 'Allocate | units.'
+    assert not groups[0]['layout_corrections']
+    assert diag['needs_review']
+
+
+@pytest.mark.parametrize('shape',['bar','roman'])
+def test_literal_bar_and_roman_letter_are_preserved(shape):
+    image, paragraphs = inline_fixture('I' if shape=='roman' else '|',shape)
+    def forbidden(*args):
+        pytest.fail('a literal bar or Roman I must not be forced into digits')
+    groups = _layout_groups(paragraphs,image,lambda *a: ('',0),diag := {'needs_review':False,'warnings':[]},forbidden)
+    assert not groups[0]['layout_corrections'] and not diag['needs_review']
+
+
+def test_inline_letter_adjacent_to_word_is_not_changed():
+    image, paragraphs = inline_fixture('l')
+    paragraphs[(1,1)]['words'][0]['box'][2] = 200
+    groups = _layout_groups(paragraphs,image,lambda *a: ('',0),diag := {'needs_review':False,'warnings':[]},
+                            lambda *a: pytest.fail('adjacent letter'))
+    assert groups[0]['text'] == 'Allocate l units.' and not diag['needs_review']
+
+
+def test_unrestricted_prefix_fallback_confirms_existing_number_or_repairs_damage(layout):
+    image,_ = layout
+    assert _reread_number(image,[80,80,130,110],lambda *a: ('',0),'8.7',83,
+                          lambda *a: ('8.7',82)) == '8.7'
+    assert _reread_number(image,[80,80,130,110],lambda *a: ('',0),'6.|',72,
+                          lambda *a: ('6.1',94)) == '6.1'
+    answers = iter([('6.1',95),('6.7',95)])
+    assert _reread_number(image,[80,80,130,110],lambda *a: ('',0),'6.|',72,
+                          lambda *a: next(answers)) is None

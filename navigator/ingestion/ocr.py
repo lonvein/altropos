@@ -266,7 +266,45 @@ def _filled_bullet(image, word, following, body_height):
     return bool(ink.size and center.size and ink.mean() > .65 and center.mean() > .9)
 
 
-def _reread_number(image, box, read, original="", confidence=0):
+def _numeric_stroke(image, box):
+    """A serif-like digit stroke with a sloping head and foot, unlike a plain bar/I."""
+    import numpy as np
+    x0,y0,x1,y1 = (int(v) for v in box)
+    ink = np.asarray(image.crop((x0,y0,x1,y1)).convert("L")) < 170
+    if not ink.size or ink.shape[0] < 12 or ink.shape[1] < 4:
+        return False
+    h,w = ink.shape
+    head,stem,foot = ink[:max(1,int(h*.25))],ink[int(h*.35):int(h*.7)],ink[int(h*.8):]
+    hy,hx = np.where(head)
+    sy,sx = np.where(stem)
+    if not len(hx) or not len(sx) or not foot.any():
+        return False
+    stem_width = float(np.median(stem.sum(axis=1)))
+    return bool(stem_width and hx.mean() < sx.mean()-w*.04
+                and stem_width*1.3 < head.sum(axis=1).max() < w*.85
+                and foot.sum(axis=1).max() > stem_width*1.4)
+
+
+def _reread_inline_number(image, box, read):
+    """Unrestricted OCR on raw and binary ROI must independently agree."""
+    import math
+    x0,y0,x1,y1 = box
+    pad = max(3,math.ceil((y1-y0)*.14))
+    crop = image.crop((max(0,int(x0)-pad),max(0,int(y0)-pad),
+                       min(image.width,int(x1)+pad),min(image.height,int(y1)+pad))).convert("L")
+    values = []
+    for variant in (crop,crop.point(lambda v:255 if v>160 else 0)):
+        try:
+            text,confidence = read(variant,13)
+        except Exception:
+            return None
+        if confidence < 85 or len(text.strip()) != 1 or text.strip() not in "0123456789":
+            return None
+        values.append(text.strip())
+    return values[0] if values[0] == values[1] else None
+
+
+def _reread_number(image, box, read, original="", confidence=0, read_unrestricted=None):
     """Changes require two local readings; one can confirm an unchanged source number."""
     import re
     from collections import Counter
@@ -274,6 +312,7 @@ def _reread_number(image, box, read, original="", confidence=0):
     pad = max(3, round((y1-y0)*.13))
     crop = image.crop((max(0,int(x0)-pad),max(0,int(y0)-pad),
                        min(image.width,int(x1)+pad),min(image.height,int(y1)+pad))).convert("L")
+    source_confidence = confidence
     readings = [original] if confidence >= 70 and re.fullmatch(r"\d+(?:\.\d+)+[.)]?",original) else []
     for variant, psm in ((crop,7),(crop,13),(crop.point(lambda v: 255 if v > 160 else 0),7)):
         try:
@@ -286,10 +325,24 @@ def _reread_number(image, box, read, original="", confidence=0):
         counts = Counter(readings)
         if counts and counts.most_common(1)[0][1] >= 2:
             return counts.most_common(1)[0][0]
+    if read_unrestricted is not None:
+        votes = []
+        for variant in (crop,crop.point(lambda v:255 if v>160 else 0)):
+            try:
+                text, local_confidence = read_unrestricted(variant,13)
+            except Exception:
+                continue
+            text = text.strip()
+            if local_confidence >= 80 and re.fullmatch(r"\d+(?:\.\d+)+[.)]?",text):
+                if text == original and source_confidence >= 70:
+                    return original
+                votes.append(text)
+        if len(votes) == 2 and votes[0] == votes[1]:
+            return votes[0]
     return None
 
 
-def _layout_groups(paragraphs, image, read, diagnostics):
+def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None):
     """Recover marker boundaries and hanging continuations across OCR paragraphs."""
     import re
     from statistics import median
@@ -320,7 +373,7 @@ def _layout_groups(paragraphs, image, read, diagnostics):
                     changes.append({"kind":"bullet", "before":raw.split()[0],
                                     "after":"•", "box":first["box"]})
             elif number and (first["conf"] < 90 or not re.fullmatch(r"\d+(?:\.\d+)+[.)]?",first["text"])):
-                corrected = _reread_number(image,first["box"],read,first["text"],first["conf"])
+                corrected = _reread_number(image,first["box"],read,first["text"],first["conf"],read_unrestricted)
                 if corrected and corrected != first["text"]:
                     changes.append({"kind":"number", "before":first["text"],"after":corrected,"box":first["box"]})
                     first["text"] = corrected
@@ -328,6 +381,26 @@ def _layout_groups(paragraphs, image, read, diagnostics):
                 elif corrected is None:
                     diagnostics["needs_review"] = True
                     diagnostics["warnings"].append(f"Номер пункта {first['text']} не подтверждён повторным OCR области")
+            if read_unrestricted is not None:
+                for index, token in enumerate(words[1:-1],start=1):
+                    height = token["box"][3]-token["box"][1]
+                    left_word,right_word = words[index-1],words[index+1]
+                    # Exclude list markers, adjacent word letters and table separators.
+                    if (token["text"] not in ("|","I","l") or not body*.65 <= height <= body*1.5
+                            or not any(c.isalpha() for c in left_word["text"])
+                            or not any(c.isalpha() for c in right_word["text"])
+                            or token["box"][0]-left_word["box"][2] < body*.15
+                            or right_word["box"][0]-token["box"][2] < body*.15
+                            or not _numeric_stroke(image,token["box"])):
+                        continue
+                    corrected = _reread_inline_number(image,token["box"],read_unrestricted)
+                    if corrected:
+                        changes.append({"kind":"inline_number","before":token["text"],"after":corrected,"box":token["box"]})
+                        token["text"] = corrected
+                        diagnostics["warnings"].append("Числовой токен уточнён согласованным OCR области без ограничения алфавита")
+                    else:
+                        diagnostics["needs_review"] = True
+                        diagnostics["warnings"].append("Неоднозначный числовой токен внутри строки; исходный символ сохранён")
             top = min(word["box"][1] for word in words)
             bottom = max(word["box"][3] for word in words)
             left = min(word["box"][0] for word in words)
@@ -440,7 +513,12 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
             values = [(t,float(c)) for t,c in zip(data["text"],data["conf"]) if t.strip()]
             return ("".join(t for t,_ in values), min(c for _,c in values)) if values else ("",0.)
 
-        for par in _layout_groups(paragraphs,work,read_number,diag):
+        def read_unrestricted(crop, psm):
+            data = pytesseract.image_to_data(crop,lang=LANGS,config=f"{config} --psm {psm}",output_type=Output.DICT)
+            values = [(t,float(c)) for t,c in zip(data["text"],data["conf"]) if t.strip()]
+            return ("".join(t for t,_ in values),min(c for _,c in values)) if values else ("",0.)
+
+        for par in _layout_groups(paragraphs,work,read_number,diag,read_unrestricted):
             text = " ".join(" ".join(words) for _, words in sorted(par["line"].items()))
             markers = _reference_markers(par["words"])
             for marker in markers:
