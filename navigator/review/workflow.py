@@ -92,6 +92,13 @@ def _table(rows):
         for cell in row) + "</tr>" for row in rows) + "</table>"
 
 
+def _cell_text(cell):
+    if cell.get("formula") is not None:
+        cached = cell.get("cached")
+        return "нет сохранённого результата (не пересчитывалось)" if cached is None else str(cached)
+    return cell.get("text")
+
+
 def _block(block):
     label = ("<details class='block-details'><summary>Адрес и диагностика блока</summary>" +
              _pre(json.dumps({k: v for k, v in block.items()
@@ -107,16 +114,14 @@ def _block(block):
             return label + "<p>Большой разреженный лист: ячейки с точными адресами; " \
                 "пропущенные позиции пусты. Полный снимок — snapshot.json.</p>" + _table([
                     [cell.get("ref", f'row={row["row"]}, col={cell["col"]}'),
-                     json.dumps(cell, ensure_ascii=False)] for row in rows for cell in row["cells"]])
+                     _cell_text(cell)] for row in rows for cell in row["cells"]])
         grid = []
         for r in range(1, max(by_row, default=0) + 1):
             cells = {c["col"]: c for c in by_row.get(r, {}).get("cells", [])}
             line = []
             for col in range(1, width + 1):
                 c = cells.get(col, {})
-                value = c.get("text")
-                if c.get("formula") is not None:
-                    value = f'{c["formula"]} [cached: {c.get("cached")}]'
+                value = _cell_text(c)
                 line.append(value)
             grid.append(line)
         return label + _table(grid)

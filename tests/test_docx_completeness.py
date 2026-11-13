@@ -179,3 +179,33 @@ def test_oversized_header_flags_review_without_dropping_it():
     drafts = parsed.build()
     assert all(header in d.text for d in drafts)
     assert parsed.needs_review
+
+
+def test_symbol_font_markers_survive_as_readable_unicode_in_text_and_table(tmp_path):
+    doc = Document()
+    doc.add_paragraph('\uf02d Synthetic supplies')
+    paragraph = doc.add_paragraph()
+    marker = OxmlElement('w:sym')
+    from docx.oxml.ns import qn
+    marker.set(qn('w:font'), 'Symbol')
+    marker.set(qn('w:char'), 'F0B7')
+    paragraph.add_run()._r.append(marker)
+    paragraph.add_run(' Synthetic condition')
+    table = doc.add_table(rows=2, cols=1)
+    table.cell(0, 0).text = 'Synthetic header'
+    table.cell(1, 0).text = '\uf02d Synthetic table item'
+    parsed = parse_docx(save(doc, tmp_path))
+    text = '\n'.join(d.text for d in parsed.build())
+    assert '– Synthetic supplies' in text
+    assert '• Synthetic condition' in text
+    assert '– Synthetic table item' in text
+    assert '\uf02d' not in text and '\uf0b7' not in text
+    assert not parsed.needs_review
+
+
+def test_unknown_private_font_symbol_is_preserved_and_blocks_readiness(tmp_path):
+    doc = Document()
+    doc.add_paragraph('Synthetic unknown symbol \uf123')
+    parsed = parse_docx(save(doc, tmp_path))
+    assert '\uf123' in parsed.units[0].text
+    assert parsed.needs_review and any('символы шрифта' in w for w in parsed.warnings)

@@ -14,9 +14,11 @@ from navigator.ingestion.model import Parsed
 from navigator.ingestion.outline import Outline
 
 _SPACES = re.compile(r"[ \t\r\f\v\u00a0\u2007\u202f]+")
+_SYMBOL_MARKERS = {0xF02D: "–", 0xF0B7: "•"}
 
 
 def clean(text: str) -> str:
+    text = text.translate(_SYMBOL_MARKERS)
     text = _SPACES.sub(" ", text.replace("\u200b", ""))
     return "\n".join(line.strip() for line in text.split("\n")).strip()
 
@@ -34,6 +36,11 @@ def _element_text(element) -> str:
                 parts.append(node.text or "")
         elif tag == "footnoteReference":
             parts.append(f"[сноска:{node.get(_W+'id')}]")
+        elif tag == "sym":
+            try:
+                parts.append(chr(int(node.get(_W+'char', ''), 16)))
+            except (ValueError, OverflowError):
+                parts.append("\ufffd")
         elif tag in ("br", "tab"):
             parts.append(" ")
     return clean("".join(parts))
@@ -251,6 +258,8 @@ def parse_docx(path: Path) -> Parsed:
             if unit.note_id in duplicates:
                 unit.note_id = ''  # never silently pick the last candidate
 
+    if any(any(0xE000 <= ord(c) <= 0xF8FF or c == '\ufffd' for c in u.text) for u in units):
+        warnings.append("Нераспознанные символы шрифта; требуется сверка с оригиналом")
     if not any(u.kind != "heading" for u in units):
         warnings.append("В документе не найдено текста")
     return Parsed(media_type="docx", title=_guess_title(units), units=units, blocks=blocks,

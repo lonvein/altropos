@@ -208,9 +208,30 @@ def test_xlsx_sparse_grid(tmp_path):
     path = Path(prepare_document(source, tmp_path / "review", parsed=parsed)["package_dir"])
     content = (path / "index.html").read_text(encoding="utf-8")
     assert "<tr><td></td><td></td><td></td></tr>" in content
-    assert "<td>A</td><td></td><td>=1+1 [cached: 2]</td>" in content
+    assert "<td>A</td><td></td><td>2</td>" in content
     with pytest.raises(ReviewError):
         approve(path)  # empty fragments are not publishable
+
+
+def test_formula_missing_cache_is_readable_without_evaluating_or_replacing_zero(tmp_path):
+    from openpyxl import Workbook
+    from bs4 import BeautifulSoup
+    book = Workbook()
+    book.active.append(['Synthetic field', 'Synthetic total', 'Synthetic comment'])
+    book.active.append(['Artificial data', '=SUM(1,2)', 0])
+    source = tmp_path / 'synthetic-formulas.xlsx'
+    book.save(source)
+    book.close()
+    package = Path(prepare_document(source, tmp_path / 'review')['package_dir'])
+    soup = BeautifulSoup((package / 'index.html').read_text('utf-8'), 'html.parser')
+    main = soup.find('main')
+    assert 'нет сохранённого результата' in main.get_text()
+    assert 'cached:' not in main.get_text() and '=SUM(1,2)' not in main.get_text()
+    assert main.find_all('tr')[1].find_all('td')[2].text == '0'
+    snapshot = json.loads((package / 'snapshot.json').read_text('utf-8'))
+    formula = snapshot['blocks'][0]['rows'][1]['cells'][1]
+    assert formula['formula'] == '=SUM(1,2)' and formula['cached'] is None
+    assert any('без сохранённого значения' in w for w in snapshot['warnings'])
 
 
 def test_pdf_previews_rotation_side_by_side(tmp_path):
