@@ -268,7 +268,7 @@ def test_runtime_paths_accept_path_objects_without_quote_or_cache_errors(tmp_pat
 def test_broken_native_layer_uses_ocr_and_retains_review_diagnostics(monkeypatch):
     import pdfplumber
     from types import SimpleNamespace
-    page = SimpleNamespace(width=100, height=200, rotation=90,
+    page = SimpleNamespace(width=100, height=200, rotation=90, bbox=(0, 0, 100, 200), images=[],
                            extract_text=lambda: '(cid:42)'*20,
                            to_image=lambda **kw: SimpleNamespace(original=Image.new('RGB',(100,200))))
     monkeypatch.setattr(pdfplumber, 'open', lambda path: SimpleNamespace(pages=[page], close=lambda: None))

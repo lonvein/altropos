@@ -17,6 +17,7 @@ from navigator.ingestion.outline import Outline
 from navigator.ingestion.ocr import OCRResult
 
 MIN_PAGE_CHARS = 30
+IMAGE_OCR_RATIO = 0.4  # native headers do not establish coverage of a scanned body
 MARGIN_RATIO = 0.07  # доля высоты страницы под колонтитулы
 _BULLETS = {"\uf02d": "-", "\uf0b7": "•", "\uf0a7": "•", "\uf076": "•", "\uf0d8": "•", "\uf0fc": "•"}
 _LIST_START = re.compile(r"^(\d+(?:\.\d+)*[.)]?\s|[•\-–—]\s|[а-яa-z]\)\s)", re.I)
@@ -42,6 +43,38 @@ def _bbox(box, page) -> list[float] | None:
     x0, y0 = max(0.0, x0), max(0.0, y0)
     x1, y1 = min(round(float(page.width), 1), x1), min(round(float(page.height), 1), y1)
     return [x0, y0, x1, y1] if x0 < x1 and y0 < y1 else None
+
+
+def _image_dominant(page) -> bool:
+    """Detect substantial raster content even when a native header is readable.
+
+    Union clipped image rectangles so duplicate images/logos are not counted
+    repeatedly. OCR the entire rendered page once, rather than concatenating the
+    native overlay with OCR and duplicating its text.
+    """
+    left, top, right, bottom = page.bbox
+    boxes = set()
+    for image in page.images:
+        x0, y0 = max(left, image['x0']), max(top, image['top'])
+        x1, y1 = min(right, image['x1']), min(bottom, image['bottom'])
+        if x1 > x0 and y1 > y0:
+            boxes.add((x0, y0, x1, y1))
+    if not boxes:
+        return False
+    # Avoid a quadratic sweep over pathological image-heavy pages. Conservative
+    # OCR is safe; retaining only an unverified native layer is not.
+    if len(boxes) > 256:
+        return True
+    xs = sorted({x for box in boxes for x in (box[0], box[2])})
+    area = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        intervals = sorted((b[1], b[3]) for b in boxes if b[0] < x1 and b[2] > x0)
+        end, height = top, 0.0
+        for y0, y1 in intervals:
+            height += max(0, y1 - max(end, y0))
+            end = max(end, y1)
+        area += (x1 - x0) * height
+    return area >= (right - left) * (bottom - top) * IMAGE_OCR_RATIO
 
 
 def _good_table(rows: list[list[str | None]]) -> bool:
@@ -225,9 +258,13 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
             except Exception:
                 native_text = ""
                 diag["warnings"].append("Ошибка чтения текстового слоя")
-            if len(native_text) < MIN_PAGE_CHARS or _broken_encoding(native_text):
+            raster_body = _image_dominant(page)
+            if len(native_text) < MIN_PAGE_CHARS or _broken_encoding(native_text) or raster_body:
                 result = _ocr_page(page, number, ocr)
                 diag.update(result.diagnostics)
+                if raster_body:
+                    diag['raster_body'] = True
+                    diag['warnings'].append('Значительная часть страницы представлена изображением; требуется OCR всей страницы')
                 if _broken_encoding(native_text):
                     diag["warnings"].append("Повреждённая кодировка текстового слоя; использован OCR")
                 if not result:
