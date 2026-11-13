@@ -14,6 +14,15 @@ if (Test-Path -LiteralPath $stopFile) { throw 'Remove stop.request explicitly be
 # Exclusive handle prevents two supervisors. It is released on exit/crash.
 $lock = [IO.File]::Open((Join-Path $state.FullName 'supervisor.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
 $child = $null
+function Stop-OwnProcessTree($process) {
+    if ($null -ne $process -and -not $process.HasExited) {
+        # Windows venv python.exe is a redirector with a child interpreter.
+        # Killing only the redirector leaves uvicorn holding DATA_DIR and port.
+        & taskkill.exe /PID $process.Id /T /F | Out-Null
+        if ($LASTEXITCODE -ne 0 -and -not $process.HasExited) { throw 'Could not stop our process tree' }
+        $process.WaitForExit()
+    }
+}
 try {
     while (-not (Test-Path -LiteralPath $stopFile)) {
         $script = Join-Path $repo 'scripts/deploy/serve.py'
@@ -24,11 +33,11 @@ try {
             Start-Sleep -Seconds 1
             $child.Refresh()
         }
-        if (-not $child.HasExited) { Stop-Process -InputObject $child; $child.WaitForExit() }
+        Stop-OwnProcessTree $child
         $child = $null
         if (-not (Test-Path -LiteralPath $stopFile)) { Start-Sleep -Seconds 10 }
     }
 } finally {
-    if ($null -ne $child -and -not $child.HasExited) { Stop-Process -InputObject $child }
+    Stop-OwnProcessTree $child
     $lock.Dispose()
 }

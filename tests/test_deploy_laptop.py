@@ -133,3 +133,51 @@ def test_offline_backup_restore(tmp_path):
     with offline_lock(data):
         refused = subprocess.run([sys.executable, str(root / "scripts/deploy/backup.py"), str(data), str(tmp_path / "busy.zip")], capture_output=True)
         assert refused.returncode != 0
+
+
+def test_windows_supervisor_stops_venv_interpreter_tree(tmp_path):
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+    if os.name != "nt":
+        pytest.skip("Windows supervisor and venv redirector")
+    import httpx
+    from scripts.deploy.serve import offline_lock
+    root = Path(__file__).resolve().parents[1]
+    state = tmp_path / "state"
+    config = tmp_path / "reader.env"
+    data = tmp_path / "data"
+    config.write_text(f"DATA_DIR={data.as_posix()}\nREVIEW_DIR={(tmp_path / 'review').as_posix()}\nML_ENABLED=false\nLLM_ENABLED=false\nPUBLIC_ORIGIN=https://aitropos.ru\n")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    supervisor = subprocess.Popen([
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        str(root / "scripts/deploy/supervise.ps1"), "-Python", sys.executable,
+        "-EnvFile", str(config), "-StateDirectory", str(state), "-ReaderPort", str(port),
+    ], creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        with httpx.Client(trust_env=False, timeout=1) as client:
+            deadline = time.monotonic() + 30
+            while True:
+                assert supervisor.poll() is None
+                try:
+                    if client.get(f"http://127.0.0.1:{port}/").status_code == 200:
+                        break
+                except httpx.TransportError:
+                    pass
+                assert time.monotonic() < deadline
+                time.sleep(0.2)
+    finally:
+        state.mkdir(exist_ok=True)
+        (state / "stop.request").touch()
+        supervisor.wait(timeout=20)
+    assert supervisor.returncode == 0
+    with socket.socket() as sock:
+        sock.settimeout(1)
+        assert sock.connect_ex(("127.0.0.1", port)) != 0, "Orphan interpreter still listening"
+    with offline_lock(data):
+        pass
