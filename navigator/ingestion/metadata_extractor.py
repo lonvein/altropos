@@ -26,8 +26,18 @@ _DATE_RE = re.compile(r"(?:от|«)\s*(\d{1,2})[.»\s]+([а-яё]+|\d{2})[.\s]+(
 _VALID_FROM_RE = re.compile(r"(?:вступает\s+в\s+силу\s+(?:с|со)?|действие\s+с)\s*«?\s*(\d{1,2})[.»\s]+([а-яё]+|\d{2})[.\s]+(\d{4})", re.I)
 _VALID_TO_RE = re.compile(r"(?:действует\s+до|срок\s+действия\s+до)\s*«?\s*(\d{1,2})[.»\s]+([а-яё]+|\d{2})[.\s]+(\d{4})", re.I)
 
-_REPEALS_RE = re.compile(r"(?:отменить\s+действие|признать\s+утратившим\s+силу)\s+приказа(?:\s+от\s+[^«\n,]+)?\s*(?:№|N)\s*([0-9]+(?:[-/][0-9а-яА-Яa-zA-Z]+)?)", re.I)
-_AMENDS_RE = re.compile(r"(?:внести\s+изменения\s+в|о\s+внесении\s+изменений\s+в)\s+приказ(?:\s+от\s+[^«\n,]+)?\s*(?:№|N)\s*([0-9]+(?:[-/][0-9а-яА-Яa-zA-Z]+)?)", re.I)
+_REPEALS_RE = re.compile(
+    r"(?:отменить\s+действие|признать\s+утратившим[и]?\s+силу)\s+"
+    r"(?:(?:пункт[ауы]?|пп?\.|раздел[ауы]?)\s*([0-9]+(?:\.[0-9]+)*)\s+)?"
+    r"приказ[а]?(?:\s+от\s+[^«\n,]+)?\s*(?:№|N)\s*([0-9]+(?:[-/][0-9а-яА-Яa-zA-Z]+)?)",
+    re.I,
+)
+_AMENDS_RE = re.compile(
+    r"(?:внести\s+изменения\s+в|о\s+внесении\s+изменений\s+в)\s+"
+    r"(?:(?:пункт[ауы]?|пп?\.|раздел[ауы]?)\s*([0-9]+(?:\.[0-9]+)*)\s+)?"
+    r"приказ[а]?(?:\s+от\s+[^«\n,]+)?\s*(?:№|N)\s*([0-9]+(?:[-/][0-9а-яА-Яa-zA-Z]+)?)",
+    re.I,
+)
 _APPENDIX_RE = re.compile(r"приложени[ея]\s*(?:№|N)?\s*([0-9а-яА-Я\w.-]+)?\s*к\s+приказу(?:\s+от\s+[^«\n,]+)?\s*(?:№|N)\s*([0-9]+(?:[-/][0-9а-яА-Яa-zA-Z]+)?)", re.I)
 
 
@@ -91,18 +101,22 @@ def extract_metadata(units: list[Unit], title_hint: str = "", filename: str = ""
     seen_rel = set()
 
     for m in _AMENDS_RE.finditer(header_blob):
-        target_num = m.group(1)
-        key = ("amends", target_num)
+        target_section, target_num = m.groups()
+        key = ("amends", target_num, target_section)
         if key not in seen_rel:
             seen_rel.add(key)
-            relations.append(Relation(target_id=target_num, kind="amends", confirmed=False))
+            relations.append(
+                Relation(target_id=target_num, kind="amends", target_section=target_section, confirmed=False)
+            )
 
     for m in _REPEALS_RE.finditer(header_blob):
-        target_num = m.group(1)
-        key = ("repeals", target_num)
+        target_section, target_num = m.groups()
+        key = ("repeals", target_num, target_section)
         if key not in seen_rel:
             seen_rel.add(key)
-            relations.append(Relation(target_id=target_num, kind="repeals", confirmed=False))
+            relations.append(
+                Relation(target_id=target_num, kind="repeals", target_section=target_section, confirmed=False)
+            )
 
     for m in _APPENDIX_RE.finditer(header_blob):
         app_sec, target_num = m.groups()

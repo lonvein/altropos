@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from navigator.ingestion import parse_file
 from navigator.ingestion.common import document_ids, sha256_bytes, to_fragments
 from navigator.ingestion.metadata_extractor import extract_metadata
 from navigator.interfaces import Indexer
-from navigator.schemas import Document, MetadataPatch
+from navigator.schemas import Document, MetadataPatch, Relation
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,9 @@ class DocumentService:
             title = Path(filename).stem[:500]
             meta = meta.model_copy(update={"title": title})
 
+        if meta.relations:
+            meta = meta.model_copy(update={"relations": self._resolve_relations(meta.relations)})
+
         warnings = [w[:500] for w in parsed.warnings]
         source_url = previous_doc.source_url if previous_doc else registered.get("url")
         retrieved_at = previous_doc.retrieved_at if previous_doc else None
@@ -191,6 +195,8 @@ class DocumentService:
             "UPDATE documents SET title=?, metadata=?, payload=?, status=?, url=? WHERE id=?",
             (title, meta.model_dump_json(), doc.model_dump_json(), target_status, source_url, doc_id),
         )
+        if meta.number:
+            self._backfill_incoming_relations(doc_id, meta.number)
 
         if requires_review:
             return (
@@ -373,6 +379,77 @@ class DocumentService:
         rows = self.store.rows("SELECT * FROM documents ORDER BY created DESC")
         return [self._format_doc_record(dict(r)) for r in rows]
 
+    @staticmethod
+    def _normalize_order_number(value: str | None) -> str:
+        raw = (value or "").strip()
+        raw = re.sub(r"^(?:№|N)\s*", "", raw, flags=re.I)
+        return re.sub(r"\s+", "", raw).lower()
+
+    def _resolve_relations(self, relations: list[Relation] | None, *, con=None) -> list[Relation] | None:
+        if not relations:
+            return relations
+        sql = "SELECT id, json_extract(metadata, '$.number') AS num FROM documents"
+        if con is not None:
+            rows = [dict(r) for r in con.execute(sql).fetchall()]
+        else:
+            rows = self.store.rows(sql)
+        existing_ids = {r["id"] for r in rows}
+        by_number: dict[str, str] = {}
+        for r in rows:
+            norm = self._normalize_order_number(r.get("num"))
+            if norm and norm not in by_number:
+                by_number[norm] = r["id"]
+
+        resolved: list[Relation] = []
+        for rel in relations:
+            if rel.target_id in existing_ids:
+                resolved.append(rel)
+                continue
+            matched_id = by_number.get(self._normalize_order_number(rel.target_id))
+            if matched_id:
+                resolved.append(rel.model_copy(update={"target_id": matched_id}))
+            else:
+                resolved.append(rel)
+        return resolved
+
+    def _backfill_incoming_relations(self, doc_id: str, doc_number: str | None, *, con=None) -> None:
+        norm = self._normalize_order_number(doc_number)
+        if not norm:
+            return
+
+        def _apply(conn) -> None:
+            rows = conn.execute(
+                "SELECT id, payload FROM documents WHERE id != ? AND payload IS NOT NULL",
+                (doc_id,),
+            ).fetchall()
+            for r in rows:
+                other_doc = Document.model_validate_json(r["payload"])
+                rels = other_doc.metadata.relations
+                if not rels:
+                    continue
+                changed = False
+                new_rels: list[Relation] = []
+                for rel in rels:
+                    if rel.target_id != doc_id and self._normalize_order_number(rel.target_id) == norm:
+                        new_rels.append(rel.model_copy(update={"target_id": doc_id}))
+                        changed = True
+                    else:
+                        new_rels.append(rel)
+                if changed:
+                    other_meta = other_doc.metadata.model_copy(update={"relations": new_rels})
+                    other_doc.metadata = other_meta
+                    conn.execute(
+                        "UPDATE documents SET metadata=?, payload=? WHERE id=?",
+                        (other_meta.model_dump_json(), other_doc.model_dump_json(), r["id"]),
+                    )
+
+        if con is not None:
+            _apply(con)
+        else:
+            with self.store.connect() as own_con:
+                own_con.execute("BEGIN IMMEDIATE")
+                _apply(own_con)
+
     def patch_metadata(self, doc_id: str, patch: MetadataPatch) -> dict:
         # Read/merge/write and optional enqueue must be one transaction. A worker
         # marks processing while holding the same SQLite writer lock.
@@ -387,6 +464,10 @@ class DocumentService:
             updated_meta = MetadataPatch.model_validate({
                 **doc.metadata.model_dump(), **patch.model_dump(exclude_unset=True),
             })
+            if updated_meta.relations:
+                updated_meta = updated_meta.model_copy(
+                    update={"relations": self._resolve_relations(updated_meta.relations, con=con)}
+                )
             doc.title = (updated_meta.title or doc.title)[:500]
             doc.metadata = updated_meta
             doc.status = row["status"]
@@ -395,6 +476,8 @@ class DocumentService:
                 doc.status = "queued"
             con.execute("UPDATE documents SET title=?,metadata=?,payload=?,status=? WHERE id=?",
                         (doc.title, updated_meta.model_dump_json(), doc.model_dump_json(), doc.status, doc_id))
+            if updated_meta.number:
+                self._backfill_incoming_relations(doc_id, updated_meta.number, con=con)
             if reprocess:
                 from uuid import uuid4
                 payload = {"document_id": doc.id, "version": doc.version, "filename": doc.name,
