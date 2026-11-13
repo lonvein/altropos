@@ -90,7 +90,7 @@ def setup(tmp_path, request):
                         document_version="v1", ordinal=0,
                         text=getattr(request, "param",
                                      "ARTIFICIAL. Submit the application to the coordinator."),
-                        locator={"kind": "pdf", "page": 1})
+                        locator={"kind": "pdf", "page": 1, "bbox": (10.0, 20.0, 400.0, 600.0)})
     artifact = tmp_path / "indexes" / "artificial-publication" / "fixture.json"
     artifact.parent.mkdir(parents=True)
     artifact.write_bytes(b"artificial fixture, not a real search index")
@@ -117,6 +117,14 @@ def ask(setup, model=None, request=None):
 
 def kinds(model):
     return [c[0] for c in model.calls if isinstance(c, tuple)]
+
+
+def test_pdf_coordinates_survive_strict_search_result_revalidation(setup):
+    model = Model([setup[4]], [Verification(supported=True, complete=True, conflict=False)])
+    response = ask(setup, model)
+    assert response.answer_mode == "generated" and response.status == "answered"
+    generated = next(c[1] for c in model.calls if isinstance(c, tuple) and c[0] == "generate")
+    assert generated.fragments[0].locator.bbox == (10.0, 20.0, 400.0, 600.0)
 
 
 @pytest.mark.parametrize("complete,conflict,status", [
