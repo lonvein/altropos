@@ -56,7 +56,7 @@ class ReaderGateway:
         if "%" in path or "\\" in path or ".." in path:
             return await reject(403, "Forbidden")
         read = path == "/" or re.fullmatch(r"/static/[a-zA-Z0-9_./-]+", path) or re.fullmatch(
-            r"/api/(sources/[a-zA-Z0-9_-]+|documents/[a-zA-Z0-9_-]+/original)", path)
+            r"/api/(sources/[a-zA-Z0-9_-]+|documents/[a-zA-Z0-9_-]+/(?:original|view))", path)
         ask = path == "/api/ask" and method == "POST"
         if not ((read and method in {"GET", "HEAD"}) or ask):
             return await reject(403, "Reader access only")

@@ -83,6 +83,20 @@ def test_bm25_restart_dedup_empty(tmp_path):
     assert tokens("МФТИ Ёж 12.11.2026 №42") == ["мфти", "еж", "12", "11", "2026", "42"]
 
 
+def test_validity_notices_only_name_selected_documents(tmp_path):
+    store = Store(tmp_path)
+    for doc_id, text, title in [("relevant", "поселения сотрудника", "Искусственный регламент поселения"),
+                                ("other", "техническое оборудование", "Искусственный регламент оборудования")]:
+        doc, fragments = document(store, doc_id, texts=[text], metadata={"title": title})
+        Indexer(store, settings()).index_document(doc.id, fragments)
+    result = search(store, question="поселения")
+    assert result.hits[0].fragment.document_id == "relevant"
+    notices = [w for w in result.warnings if "Период действия" in w]
+    assert len(notices) == 1
+    assert "Искусственный регламент поселения" in notices[0]
+    assert not any("оборудования" in w for w in result.warnings)
+
+
 def test_hybrid_restart_normalization_rerank(tmp_path):
     store, config = Store(tmp_path), settings(True)
     doc, fragments = document(store, texts=["ИСКУССТВЕННЫЙ ПРИМЕР. заявка", "ИСКУССТВЕННЫЙ ПРИМЕР. справка"])

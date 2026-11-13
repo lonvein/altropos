@@ -128,6 +128,7 @@ class AnswerPipeline:
 
         generation = GenerationRequest(question=request.question, as_of=as_of, fragments=selected)
         client = self.llm
+        protocol_failed = False
 
         async def timed_call(stage, operation):
             start = perf_counter()
@@ -158,6 +159,7 @@ class AnswerPipeline:
                                  Draft.model_validate(raw.model_dump(mode="json")
                                                       if isinstance(raw, Draft) else raw))
                         draft = validate_draft(draft, selected)
+                        protocol_failed = False
                         checked = await timed_call("verification_ms", validate_answer(
                             draft, selected, question=request.question, client=client, as_of=as_of))
                         assessment = checked.model_assessment
@@ -191,6 +193,7 @@ class AnswerPipeline:
                     except ComponentError as exc:
                         if exc.detail.code != "invalid_model_output":
                             raise
+                        protocol_failed = True
                         # The adapter can reject evidence after parsing a valid
                         # Draft. Keep a freshly shape-validated copy for repair,
                         # never as an approved answer or trusted evidence.
@@ -203,11 +206,16 @@ class AnswerPipeline:
                                 pass
                         issues = ["Исправьте структуру ответа, ID и дословные цитаты; используйте только переданные материалы."]
                     except ValidationError:
+                        protocol_failed = True
                         issues = ["Верните корректный JSON по схеме Draft с дословными цитатами."]
         except ComponentError as exc:
             if exc.detail.code == "context_exceeded":
-                return fallback("Контекст модели превышен; приведены только источники без проверки полноты.")
-            return fallback("Локальная LLM временно недоступна; повторите запрос. Приведены только источники.")
+                return fallback("Контекст модели превышен; приведены только источники без проверки полноты.",
+                                "unavailable")
+            return fallback("Локальная LLM временно недоступна; повторите запрос. Приведены только источники.",
+                            "unavailable")
         except (OSError, TimeoutError):
-            return fallback("Локальная LLM временно недоступна; повторите запрос. Приведены только источники.")
-        return fallback("Ответ не прошёл проверку после одной попытки исправления; приведены только источники.")
+            return fallback("Локальная LLM временно недоступна; повторите запрос. Приведены только источники.",
+                            "unavailable")
+        return fallback("Ответ не прошёл проверку после одной попытки исправления; приведены только источники.",
+                        "unavailable" if protocol_failed else "not_found")

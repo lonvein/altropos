@@ -102,3 +102,56 @@ mark {
   font-size: 0.82rem;
   color: var(--source-muted);
 }
+
+/* Publication sections stay in normal flow: long pages and wide tables remain readable. */
+.source-fragment {
+  margin-block: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--source-border);
+  border-radius: 0.5rem;
+  scroll-margin-block-start: 1rem;
+  min-width: 0;
+}
+
+.source-fragment:target,
+.source-fragment--selected {
+  border-color: var(--source-warning);
+  background: var(--source-warning-bg);
+}
+
+.source-document pre,
+.source-fragment pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.source-document table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.source-document th,
+.source-document td {
+  padding: 0.4rem;
+  border: 1px solid var(--source-border);
+  vertical-align: top;
+}
+
+.source-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-block: 1rem;
+}
+
+.source-navigation a {
+  color: inherit;
+}
+
+@media (max-width: 600px) {
+  body { padding: 0.8rem; }
+  .source-fragment { padding: 0.75rem; }
+}

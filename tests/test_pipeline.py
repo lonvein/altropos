@@ -172,6 +172,7 @@ def test_llm_failure_preserves_sources(setup, code):
     model = Model([failure(code)], [])
     response = ask(setup, model)
     assert response.answer_mode == "sources_only" and response.sources
+    assert response.status == "unavailable"
     assert kinds(model) == ["generate"]
     assert ADVICE not in response.model_dump_json()
 
@@ -283,7 +284,10 @@ def test_ambiguous_clarification_is_server_controlled(setup):
 
 def test_invalid_json_twice_stops_after_one_correction(setup):
     model = Model([failure("invalid_model_output"), "not JSON"], [])
-    assert ask(setup, model).answer_mode == "sources_only"
+    response = ask(setup, model)
+    assert response.answer_mode == "sources_only"
+    assert response.status == "unavailable"
+    assert response.sources
     assert kinds(model) == ["generate", "generate"]
 
 
