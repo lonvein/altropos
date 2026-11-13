@@ -122,7 +122,7 @@ def test_intro_and_all_four_complete_conditions_reach_same_fragment(layout,monke
     groups = _layout_groups(paragraphs,image,lambda *args: ('4.1',90),{'needs_review':False,'warnings':[]})
     items = [{'text':g['text'],'bbox':g['box'],'list_item':g['list_item'],
               'raw_text':g['raw_text'],'layout_corrections':g['layout_corrections']} for g in groups]
-    page = SimpleNamespace(width=1200,height=1400,rotation=0,extract_text=lambda: '',
+    page = SimpleNamespace(width=1200,height=1400,rotation=0,bbox=(0,0,1200,1400),images=[],extract_text=lambda: '',
                            to_image=lambda **kw: SimpleNamespace(original=image))
     import pdfplumber
     monkeypatch.setattr(pdfplumber,'open',lambda *args: SimpleNamespace(pages=[page],close=lambda: None))

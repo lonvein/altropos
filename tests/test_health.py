@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -48,11 +49,14 @@ def test_pages_render_without_model_services(client):
 
 
 @pytest.mark.asyncio
-async def test_local_model_probe_ignores_unrelated_proxy(monkeypatch):
+@pytest.mark.parametrize("response_delay", [0, 2.0])
+async def test_local_model_probe_ignores_unrelated_proxy(monkeypatch, response_delay):
     from navigator.ui.health import _probe
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            # A reachable remote ML service may exceed the former 1.5 s probe.
+            time.sleep(response_delay)
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"status":"ready"}')

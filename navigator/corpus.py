@@ -140,6 +140,7 @@ def publish_initial(manifest_path: Path, out_root: Path, settings: Settings, *, 
         return {"approved": len(inputs), "published": 0, "dry_run": True}
     from navigator.db import Store
     from navigator.documents.storage import DocumentStorage
+    from navigator.documents.snapshots import save_approved_snapshot
     from navigator.rag.clients import EmbeddingsClient
     from navigator.rag.indexing import Indexer
     from navigator.schemas import Document
@@ -162,5 +163,6 @@ def publish_initial(manifest_path: Path, out_root: Path, settings: Settings, *, 
         canonical = store.register_document(document)
         if canonical != document.id:
             raise ValueError("Existing source has another extraction version; explicit migration required")
+        save_approved_snapshot(store, document, loaded)
         results.append(indexer.index_document(document.id, loaded["fragments"]).model_dump(mode="json"))
     return {"approved": len(inputs), "published": len(results), "results": results}

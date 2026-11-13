@@ -11,7 +11,7 @@ from navigator.config import Settings
 log = logging.getLogger("navigator.ui.health")
 
 
-async def _probe(url: str, timeout: float = 1.5) -> dict[str, Any]:
+async def _probe(url: str, timeout: float = 5.0) -> dict[str, Any]:
     """Best-effort reachability probe; a missing service must not break the UI."""
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
