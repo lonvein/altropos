@@ -212,6 +212,8 @@ class DocumentService:
                 return True
 
             # Публикуем только через совместимый RAG-индексатор
+            from navigator.documents.snapshots import save_snapshot
+            save_snapshot(self.store, doc, fragments, parsed.blocks)
             index_res = self.indexer.index_document(doc_id, fragments)
 
             self.store.execute("UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?", (doc_id,))

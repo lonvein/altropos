@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from navigator.documents.presentation import SOURCE_HEADERS, render_publication
 from navigator.documents.service import DocumentService, InitialCorpusReviewRequired
+from navigator.documents.snapshots import load_snapshot
 from navigator.ingestion.common import ParseError
 from navigator.schemas import Fragment, MetadataPatch
 
@@ -107,26 +108,34 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
 
     @api.get("/documents/{document_id}/view")
     def document_view(request: Request, document_id: str):
-        rows = current(request).store.rows("""SELECT d.id,d.title,p.fragments FROM documents d
+        rows = current(request).store.rows("""SELECT d.id,d.title,d.sha,d.payload,p.manifest,p.fragments FROM documents d
             JOIN publications p ON p.id=d.active_publication
             WHERE d.status='ready' AND d.id=?""", (document_id,))
         if not rows:
             return _error("not_found", "Опубликованный документ не найден.", 404)
         row = rows[0]
         fragments = [Fragment.model_validate(data) for data in json.loads(row["fragments"])]
-        return HTMLResponse(render_publication(row["title"], row["id"], fragments), headers=SOURCE_HEADERS)
+        try:
+            blocks = load_snapshot(current(request), row, fragments)
+        except (ValueError, OSError, KeyError, TypeError):
+            return _error("not_ready", "Полный подтверждённый снимок недоступен. Откройте оригинал.", 409)
+        return HTMLResponse(render_publication(row["title"], row["id"], fragments, blocks=blocks), headers=SOURCE_HEADERS)
 
     @api.get("/sources/{fragment_id}")
     def source(request: Request, fragment_id: str):
         # Both routes use only active ready snapshots; never a mutable extraction cache.
-        rows = current(request).store.rows("""SELECT d.id,d.title,p.fragments FROM documents d
+        rows = current(request).store.rows("""SELECT d.id,d.title,d.sha,d.payload,p.manifest,p.fragments FROM documents d
             JOIN publications p ON p.id=d.active_publication WHERE d.status='ready'""")
         for row in rows:
             data = json.loads(row["fragments"])
             if not any(item["id"] == fragment_id for item in data):
                 continue
             fragments = [Fragment.model_validate(item) for item in data]
-            return HTMLResponse(render_publication(row["title"], row["id"], fragments, fragment_id),
+            try:
+                blocks = load_snapshot(current(request), row, fragments)
+            except (ValueError, OSError, KeyError, TypeError):
+                return _error("not_ready", "Полный подтверждённый снимок недоступен. Откройте оригинал.", 409)
+            return HTMLResponse(render_publication(row["title"], row["id"], fragments, fragment_id, blocks=blocks),
                                 headers=SOURCE_HEADERS)
         return _error("not_found", "Опубликованный источник не найден.", 404)
 

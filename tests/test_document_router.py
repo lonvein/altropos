@@ -192,8 +192,8 @@ def test_full_view_and_citation_preserve_all_published_fragments(service):
             assert 'ARTIFICIAL FINAL MARKER' in response.text
             assert '&lt;script&gt;unsafe&lt;/script&gt;' in response.text
             assert '<script>' not in response.text
-            for fragment in fragments:
-                assert escape(fragment.text) in response.text
+            # Canonical blocks appear once, without chunk overlap or search headers.
+            assert response.text.count("ARTIFICIAL FINAL MARKER") == 1
             assert 'sandbox' in response.headers['content-security-policy']
             assert response.headers['x-content-type-options'] == 'nosniff'
         citation = client.get(f'/api/sources/{selected.id}').text
@@ -235,7 +235,8 @@ def test_full_view_exposes_final_content_of_office_documents(service, extension)
         response = client.get(f"/api/documents/{uploaded['document_id']}/view")
         assert response.status_code == 200
         assert final in response.text
-        assert all(escape(fragment.text) in response.text for fragment in fragments)
+        assert response.text.count(final) == 1
+        assert ("<table>" in response.text) == (extension == "xlsx")
 
 
 def test_production_discovers_real_documents_and_env_demo_is_explicit(monkeypatch):
@@ -245,3 +246,54 @@ def test_production_discovers_real_documents_and_env_demo_is_explicit(monkeypatc
     monkeypatch.setenv('UI_SYNTHETIC_FALLBACK', 'true')
     assert create_app().state.integration['documents']['mode'] == 'synthetic'
     assert create_app(synthetic_fallback=False).state.integration['documents']['mode'] == 'real'
+
+
+@pytest.mark.parametrize('kind', ['pdf', 'docx', 'xlsx'])
+def test_canonical_blocks_survive_search_filtering_and_cache_changes(service, monkeypatch, kind):
+    """A full viewer must not be reconstructed from search-selected units."""
+    from navigator.ingestion.model import Parsed
+    from navigator.ingestion.common import FragmentDraft
+    from navigator.documents import service as module
+    loc = {'pdf': {'kind': 'pdf', 'page': 1},
+           'docx': {'kind': 'docx', 'block': 1},
+           'xlsx': {'kind': 'xlsx', 'sheet': 'Artificial', 'range': 'A1:B3'}}[kind]
+    omitted = 'ARTIFICIAL UNINDEXED CONTENT <script>unsafe</script>'
+    if kind == 'pdf':
+        blocks = [{'page': 1, 'text': omitted}, {'page': 1, 'table': [['A', 'B'], ['C', 'D']]},
+                  {'page': 2, 'text': 'ARTIFICIAL FINAL PAGE'}]
+    elif kind == 'docx':
+        blocks = [{'index': 0, 'kind': 'paragraph', 'text': omitted},
+                  {'index': 1, 'kind': 'table', 'rows': [['A', 'B'], ['C', 'D']]},
+                  {'index': 2, 'kind': 'paragraph', 'text': 'ARTIFICIAL FINAL PAGE'}]
+    else:
+        blocks = [{'sheet': 'Artificial', 'rows': [
+            {'row': 1, 'cells': [{'col': 1, 'text': omitted}, {'col': 2, 'text': 'B'}]},
+            {'row': 3, 'cells': [{'col': 2, 'text': 'ARTIFICIAL FINAL PAGE'}]}]}]
+    parsed = Parsed(media_type=kind, title='Artificial canonical source', blocks=blocks,
+                    drafts=[FragmentDraft(text='ARTIFICIAL searchable evidence', section='', locator=loc)])
+    monkeypatch.setattr(module, 'parse_file', lambda *args, **kwargs: parsed)
+    upload = service.upload_file(f'artificial.{kind}', b'ARTIFICIAL FIXTURE')
+    service.process_next_job()
+    doc_id = upload['document_id']
+    assert service.get_document(doc_id)['status'] == 'ready'
+    assert omitted not in service.store.active_publications()[0][1][0].text
+    # An unverified cache is irrelevant to the published presentation.
+    service.storage.save_extracted_blocks(doc_id, [{'text': 'MUTABLE CACHE INJECTION'}])
+    with TestClient(create_app(document_service=service)) as client:
+        path = f'/api/documents/{doc_id}/view'
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.text.count(escape(omitted)) == 1
+        assert 'ARTIFICIAL FINAL PAGE' in response.text
+        assert '<table>' in response.text
+        assert '<script>' not in response.text
+        assert 'MUTABLE CACHE INJECTION' not in response.text
+        assert response.text.index(escape(omitted)) < response.text.index('ARTIFICIAL FINAL PAGE')
+        if kind == 'pdf':
+            assert 'Страница 1' in response.text and 'Страница 2' in response.text
+        if kind == 'xlsx':
+            assert '<tr><td rowspan="1" colspan="1"></td><td rowspan="1" colspan="1"></td></tr>' in response.text
+        service.store.execute("UPDATE presentation_snapshots SET blocks='[]' WHERE document_id=?", (doc_id,))
+        assert client.get(path).status_code == 409
+        service.store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (doc_id,))
+        assert client.get(path).status_code == 404
