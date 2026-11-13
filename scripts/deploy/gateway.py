@@ -11,13 +11,16 @@ import time
 
 
 class ReaderGateway:
-    def __init__(self, app, origin, body_timeout=10):
+    def __init__(self, app, origin, body_timeout=10, ask_timeout=105):
         if not re.fullmatch(r"https://[a-z0-9.-]+(?::[0-9]+)?", origin):
             raise ValueError("PUBLIC_ORIGIN must be an explicit HTTPS origin")
         self.app, self.origin = app, origin
         self.busy = False
         self.next_question = 0.0
         self.body_timeout = body_timeout
+        if not 0 < ask_timeout <= 110:
+            raise ValueError("Public question deadline must be in (0, 110] seconds")
+        self.ask_timeout = ask_timeout
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -69,9 +72,10 @@ class ReaderGateway:
             return await reject(429, "Another question is in progress")
         self.busy = True
         self.next_question = time.monotonic() + 2
+        ask_deadline = time.monotonic() + self.ask_timeout
         try:
             body = bytearray()
-            deadline = time.monotonic() + self.body_timeout
+            deadline = min(time.monotonic() + self.body_timeout, ask_deadline)
             while True:
                 try:
                     event = await asyncio.wait_for(receive(), timeout=max(0, deadline - time.monotonic()))
@@ -91,11 +95,24 @@ class ReaderGateway:
                     used = True
                     return {"type": "http.request", "body": bytes(body), "more_body": False}
                 return await receive()
-            await self.app(scope, replay, send)
+            started = False
+            async def output(event):
+                nonlocal started
+                if event["type"] == "http.response.start":
+                    started = True
+                await send(event)
+            try:
+                await asyncio.wait_for(self.app(scope, replay, output), timeout=max(0, ask_deadline - time.monotonic()))
+            except TimeoutError:
+                if not started:
+                    return await reject(504, "Question deadline exceeded")
+                # Status cannot be changed after headers; finish this response.
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
         finally:
             self.busy = False
 
 
 def create_app():
     from navigator.main import create_app as backend
-    return ReaderGateway(backend(synthetic_fallback=False), os.environ["PUBLIC_ORIGIN"])
+    return ReaderGateway(backend(synthetic_fallback=False), os.environ["PUBLIC_ORIGIN"],
+                         ask_timeout=float(os.environ.get("PUBLIC_ASK_DEADLINE", "105")))

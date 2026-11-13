@@ -90,6 +90,33 @@ def test_slow_chunks_have_total_deadline():
     asyncio.run(run())
 
 
+def test_public_question_deadline_cancels_backend():
+    async def run():
+        cancelled = asyncio.Event()
+        async def slow(scope, receive, send):
+            try:
+                await asyncio.sleep(30)
+            finally:
+                cancelled.set()
+        gateway = ReaderGateway(slow, "https://aitropos.ru", ask_timeout=0.05)
+        events = []
+        async def receive():
+            return {"type": "http.request", "body": b"{}"}
+        async def send(event):
+            events.append(event)
+        await asyncio.wait_for(gateway({"type": "http", "method": "POST", "path": "/api/ask", "headers": [
+            (b"origin", b"https://aitropos.ru"), (b"content-type", b"application/json")]}, receive, send), timeout=1)
+        assert events[0]["status"] == 504
+        assert cancelled.is_set() and not gateway.busy
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 111])
+def test_public_deadline_cannot_exceed_proxy_budget(timeout):
+    with pytest.raises(ValueError):
+        ReaderGateway(backend, "https://aitropos.ru", ask_timeout=timeout)
+
+
 def test_health_strips_internal_data():
     import json
     async def run():
