@@ -119,8 +119,8 @@
       <li><span class="badge status-error">Ошибка</span><span>Обработка завершилась ошибкой; причина в предупреждениях.</span></li>
     </ul>
     <p class="field__hint">
-      HTML-представление DOCX/XLSX/HTML открывается из ссылок на цитаты на странице вопроса.
-      Для PDF доступен оригинал с нужной страницы.
+      «Полный текст» показывает опубликованный распознанный текст всех страниц PDF,
+      разделов DOCX и листов XLSX. Для проверки оформления и распознавания откройте оригинал.
     </p>
   </details>
 </section>
@@ -129,11 +129,17 @@
   <div class="dialog__header">
     <div>
       <p class="eyebrow">Метаданные</p>
-      <h2 id="metadata-title">Редактировать документ</h2>
+      <h2 id="metadata-title">Реквизиты документа</h2>
       <p id="metadata-doc-name" class="muted"></p>
     </div>
     <button type="button" class="icon-button" data-close-dialog aria-label="Закрыть">×</button>
   </div>
+
+  <p class="field__hint">
+    Метаданные — название, номер, даты действия и связи с другими документами.
+    Распознанное содержимое находится в разделе «Полный текст», а исходный файл — в «Оригинал».
+    Проверка реквизитов не подтверждает качество распознавания текста.
+  </p>
 
   <form id="metadata-form" class="stack-form" novalidate>
     <input type="hidden" id="metadata-document-id">
@@ -217,8 +223,9 @@
 
     <div class="document-card__actions">
       <a class="button button--secondary document-card__original" target="_blank" rel="noopener">Оригинал</a>
-      <a class="button button--ghost document-card__presentation" target="_blank" rel="noopener" hidden>HTML-представление</a>
+      <a class="button button--ghost document-card__presentation" target="_blank" rel="noopener" hidden>Полный текст</a>
       <button type="button" class="button button--primary document-card__metadata">Метаданные</button>
+      <button type="button" class="button button--secondary document-card__retry" hidden>Повторить обработку</button>
     </div>
   </li>
 </template>

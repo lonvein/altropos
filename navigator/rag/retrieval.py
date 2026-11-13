@@ -56,8 +56,6 @@ def _visible(snapshots, as_of, warnings):
         if meta.reviewed:
             if meta.valid_from and as_of < meta.valid_from or meta.valid_to and as_of > meta.valid_to:
                 continue
-        if not meta.reviewed or meta.valid_from is None:
-            warnings.append(f"Период действия {manifest.document_id} подтверждён не полностью.")
         eligible[manifest.document_id] = (manifest, fragments, meta)
     excluded = {}
     # A repeal is an effective event, not a temporary property of the repealer's
@@ -65,7 +63,6 @@ def _visible(snapshots, as_of, warnings):
     for manifest, fragments, meta in snapshots:
         for relation in meta.relations or []:
             if not relation.confirmed:
-                warnings.append("Есть неподтверждённые связи редакций; выбор редакции требует проверки.")
                 continue
             if relation.kind == "repeals":
                 # An issued date is NOT an effective repeal date.
@@ -173,11 +170,19 @@ class Searcher:
                     raise component_error("invalid_model_output", "Некорректные ID или ревизия reranker.")
                 scores = {s.fragment_id: s.score for s in response.scores}
                 score_kind = "reranker"
-                if not self.settings.threshold_calibrated:
-                    warnings.append("Порог reranker не откалиброван; качество выдачи не подтверждено.")
-                else:
+                if self.settings.threshold_calibrated:
                     scores = {key: value for key, value in scores.items()
                               if value >= self.settings.rerank_threshold}
+                elif len(scores) > 2:
+                    top_score = max(scores.values())
+                    if top_score > 0:
+                        if any(v < 0 for v in scores.values()) or top_score <= 1.0:
+                            cutoff = max(0.05, top_score * 0.35)
+                        else:
+                            cutoff = max(0.0, top_score * 0.25)
+                        filtered = {key: value for key, value in scores.items() if value >= cutoff}
+                        if filtered:
+                            scores = filtered
             except (ComponentError, TimeoutError, ImportError, ValidationError) as exc:
                 hybrid = False
                 scores, score_kind = lexical, "bm25"
@@ -187,8 +192,24 @@ class Searcher:
                 else:
                     warnings.append("ML недоступен или вернул некорректный ответ; векторная выдача отброшена.")
         limit = min(request.limit, self.settings.top_fragments)
+        selected_ids = _ordered(scores)[:limit]
+        selected_documents = {by_id[key].document_id for key in selected_ids}
+        eligible_ids = {manifest.document_id for manifest, _ in visible}
+        # Validity and revision warnings apply only to selected documents with missing dates
+        # or unresolved competing amendments/repeals, never unrelated corpus entries.
+        for manifest, _, meta in snapshots:
+            if manifest.document_id in selected_documents and meta.valid_from is None and meta.issued is None:
+                warnings.append(f"Период действия «{meta.title or manifest.document_id}» подтверждён не полностью.")
+            for relation in meta.relations or []:
+                if relation.confirmed or relation.kind not in ("repeals", "amends"):
+                    continue
+                if relation.target_id in selected_documents or (
+                    manifest.document_id in selected_documents and relation.target_id in eligible_ids
+                ):
+                    warnings.append("Есть неподтверждённые связи редакций; выбор редакции требует проверки.")
+                    break
         return SearchResult(mode="hybrid" if hybrid else "bm25",
             hits=[SearchHit(fragment=by_id[key], rank=i, score=scores[key], score_kind=score_kind)
-                  for i, key in enumerate(_ordered(scores)[:limit], 1)],
+                  for i, key in enumerate(selected_ids, 1)],
             publication_ids=[m.publication_id for m, _, _ in snapshots],
             warnings=list(dict.fromkeys(warnings)))

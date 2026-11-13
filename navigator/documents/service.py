@@ -19,12 +19,16 @@ from navigator.documents.site_importer import (
 )
 from navigator.documents.storage import DocumentStorage
 from navigator.ingestion import parse_file
-from navigator.ingestion.common import document_ids, sha256_bytes, to_fragments
+from navigator.ingestion.common import ParseError, document_ids, sha256_bytes, to_fragments
 from navigator.ingestion.metadata_extractor import extract_metadata
 from navigator.interfaces import Indexer
 from navigator.schemas import Document, MetadataPatch, Relation
 
 logger = logging.getLogger(__name__)
+
+
+class InitialCorpusReviewRequired(ParseError):
+    """Initial corpus bytes may only enter search through approved snapshots."""
 
 
 def _resolve_indexer(store: Store, settings: Settings, indexer: Indexer | None = None) -> Indexer:
@@ -53,6 +57,26 @@ class DocumentService:
         self.indexer = _resolve_indexer(self.store, self.settings, indexer)
         self.http_transport = http_transport
 
+    def _require_manual_upload_allowed(self, sha: str) -> None:
+        manifest_path = self.settings.corpus_manifest
+        if manifest_path is None:
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (not isinstance(manifest, dict) or manifest.get("schema_version") != 1
+                    or not isinstance(manifest.get("files"), list)):
+                raise ValueError("Unsupported manifest")
+            for item in manifest["files"]:
+                if (not isinstance(item, dict) or item.get("group") not in {"initial", "manual_test"}
+                        or not isinstance(item.get("sha256"), str) or len(item["sha256"]) != 64):
+                    raise ValueError("Invalid corpus group")
+                if item["sha256"] == sha and item["group"] == "initial":
+                    raise InitialCorpusReviewRequired("Initial source requires approved extraction")
+        except InitialCorpusReviewRequired:
+            raise
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise InitialCorpusReviewRequired("Corpus manifest is unavailable or invalid") from exc
+
     def upload_file(self, filename: str, content: bytes) -> dict:
         """Прием файла, дедупликация по SHA-256 и постановка в очередь обработки."""
         ext, media_type = self.storage.validate_file(filename, content)
@@ -78,6 +102,7 @@ class DocumentService:
             }
 
         # 2. Новый файл: сохраняем оригинал
+        self._require_manual_upload_allowed(sha)
         doc_id, version, rel_path, sha, media_type = self.storage.save_original(filename, content)
 
         # 3. Регистрируем документ со статусом 'queued'
@@ -138,7 +163,18 @@ class DocumentService:
         registered = self.store.document(doc_id)
         if registered is None or sha256_bytes(full_path.read_bytes()) != registered["sha"]:
             raise ValueError("Changed original requires a new immutable document version")
-        parsed = parse_file(full_path)
+        self._require_manual_upload_allowed(registered["sha"])
+        if full_path.suffix.lower() == ".pdf":
+            from navigator.ingestion.ocr import make_ocr
+            parsed = parse_file(
+                full_path,
+                ocr=make_ocr(
+                    tesseract_cmd=self.settings.tesseract_cmd,
+                    tessdata_dir=self.settings.tessdata_prefix,
+                ),
+            )
+        else:
+            parsed = parse_file(full_path)
 
         # Сохраняем адресованные блоки для просмотрщика источников
         self.storage.save_extracted_blocks(doc_id, parsed.blocks)
@@ -165,16 +201,21 @@ class DocumentService:
         if meta.relations:
             meta = meta.model_copy(update={"relations": self._resolve_relations(meta.relations)})
 
-        warnings = [w[:500] for w in parsed.warnings]
+        from navigator.ingestion.common import filter_user_warnings
+        requires_review = parsed.needs_review or not fragments
+        target_status = "needs_review" if requires_review else "processing"
+
+        warnings = filter_user_warnings(
+            [w[:500] for w in parsed.warnings],
+            status="needs_review" if requires_review else "ready",
+            needs_review=requires_review,
+        )
         source_url = previous_doc.source_url if previous_doc else registered.get("url")
         retrieved_at = previous_doc.retrieved_at if previous_doc else None
         if source_url and not (meta.issued or meta.valid_from):
             dated_warning = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
             if dated_warning not in warnings:
                 warnings.append(dated_warning)
-
-        requires_review = parsed.needs_review or not fragments
-        target_status = "needs_review" if requires_review else "processing"
         doc = Document(
             id=doc_id,
             version=version,
@@ -208,6 +249,8 @@ class DocumentService:
                 },
             )
 
+        from navigator.documents.snapshots import save_snapshot
+        save_snapshot(self.store, doc, fragments, parsed.blocks)
         index_res = self.indexer.index_document(doc_id, fragments)
         self.store.execute("UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?", (doc_id,))
         return (
@@ -369,6 +412,27 @@ class DocumentService:
             processed += 1
         return processed
 
+    def retry_document(self, doc_id: str) -> dict:
+        """Reprocess unchanged bytes without pretending metadata was reviewed."""
+        from uuid import uuid4
+        with self.store.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+            if row is None or not row["payload"]:
+                raise ValueError("Документ не найден")
+            if row["status"] not in {"needs_review", "failed"}:
+                raise ValueError("Повтор доступен только для документов с ошибкой или требующих проверки")
+            doc = Document.model_validate_json(row["payload"])
+            doc.status = "queued"
+            job_id = uuid4().hex
+            payload = {"document_id": doc.id, "version": doc.version, "filename": doc.name,
+                       "rel_path": doc.original_path, "media_type": doc.media_type}
+            con.execute("UPDATE documents SET status='queued',payload=? WHERE id=?",
+                        (doc.model_dump_json(), doc_id))
+            con.execute("INSERT INTO jobs(id,kind,payload) VALUES(?,?,?)",
+                        (job_id, "process_file", json.dumps(payload, ensure_ascii=False)))
+        return {"document_id": doc_id, "job_id": job_id, "status": "queued"}
+
     def get_document(self, doc_id: str) -> dict | None:
         row = self.store.document(doc_id)
         if not row:
@@ -508,12 +572,15 @@ class DocumentService:
                 version = payload.get("version")
             except Exception:
                 pass
+        from navigator.ingestion.common import filter_user_warnings
+        warnings = filter_user_warnings(warnings, status=row["status"], needs_review=(row["status"] == "needs_review"))
         fragment_id = None
         if row["status"] == "ready":
             fragments = self.store.rows("SELECT id FROM fragments WHERE document_id=? ORDER BY ordinal LIMIT 1", (row["id"],))
             fragment_id = fragments[0]["id"] if fragments else None
         return {
             "fragment_id": fragment_id,
+            "presentation_url": f"/api/documents/{row['id']}/view" if fragment_id else None,
             "id": row["id"],
             "name": row["name"],
             "title": row["title"],

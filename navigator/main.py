@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -177,6 +177,38 @@ def create_app(
 
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/review-files", StaticFiles(directory=str(settings.review_dir), check_dir=False), name="review-files")
+
+    REVIEW_CSP = (
+        "default-src 'none'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data:; "
+        "base-uri 'none'; "
+        "form-action 'none'"
+    )
+
+    @app.get("/review")
+    def review_page():
+        if not (settings.review_dir / "index.html").is_file():
+            return HTMLResponse(
+                "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+                "<title>Проверка распознавания</title>"
+                "<style>body{font:16px system-ui;margin:2rem}"
+                ".review-nav{margin-bottom:1.25rem}"
+                ".review-back{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .9rem;"
+                "border:1px solid #888;border-radius:6px;text-decoration:none;color:inherit;font:inherit;cursor:pointer;background:transparent}"
+                "</style></head><body>"
+                "<nav class='review-nav' aria-label='Навигация'>"
+                "<a href='/documents' class='review-back' data-review-back data-review-scope='index' data-back-fallback='/documents'>← Назад</a>"
+                "</nav>"
+                "<h1>Пакеты проверки ещё не подготовлены</h1>"
+                "<p>До одобрения документы не публикуются в поиске.</p>"
+                "<script src='/static/js/review-nav.js' defer></script>"
+                "</body></html>"
+            )
+        return RedirectResponse("/review-files/index.html")
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -185,7 +217,9 @@ def create_app(
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         path = request.url.path
-        if path.startswith("/api/sources/"):
+        if path.startswith(("/review-files/", "/review")):
+            response.headers.setdefault("Content-Security-Policy", REVIEW_CSP)
+        elif path.startswith("/api/sources/"):
             response.headers.setdefault("Content-Security-Policy", SOURCE_CSP)
         elif response.headers.get("content-type", "").startswith("text/html"):
             response.headers.setdefault("Content-Security-Policy", PAGE_CSP)

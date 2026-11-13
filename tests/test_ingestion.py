@@ -120,9 +120,26 @@ def xlsx_file(tmp_path):
 def test_xlsx_formula_without_cached_value_is_explicit_not_zero(xlsx_file):
     parsed = parse_file(xlsx_file)
     frags = fragments_of(parsed)
-    assert any("без сохранённого значения" in w for w in parsed.warnings)
+    assert not any("без сохранённого значения" in w for w in parsed.warnings)
     table = next(f for f in frags if "Расходы" in f.text)
-    assert "=SUM(C3:C3)" in table.text and "значение не сохранено" in table.text
+    assert "Сумма (C4): 500" in table.text
+    import openpyxl, tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Демо"
+        ws.append(["ИСКУССТВЕННАЯ СМЕТА"])
+        ws.append(["Показатель", "Код", "Сумма"])
+        ws.append(["Пустой расчёт", "300", "=SUM(Z1:Z2)"])
+        uncomputed = Path(td) / "uncomputed.xlsx"
+        wb.save(uncomputed)
+        parsed_u = parse_file(uncomputed)
+        assert not any("без сохранённого значения" in w for w in parsed_u.warnings)
+        assert any(len(d.get("uncached_formulas", ())) >= 1 for d in parsed_u.diagnostics)
+        table_u = next(f for f in fragments_of(parsed_u) if "Пустой расчёт" in f.text)
+        assert "=SUM(Z1:Z2)" in table_u.text and "значение не сохранено" in table_u.text
+        assert "Сумма (C3): 0" not in table_u.text
     assert "Сумма (C4): 0" not in table.text
     assert table.locator.kind == "xlsx" and table.locator.sheet == "Демо"
     assert table.locator.range == "A3:C4"
@@ -208,7 +225,7 @@ def test_pdf_ocr_hook_is_used_for_pages_without_text(tmp_path):
     parsed = parse_file(path, ocr=fake_ocr)
     assert calls == [1]
     assert not parsed.needs_review
-    assert any("OCR" in w for w in parsed.warnings)
+    assert not any("Страницы распознаны OCR" in w for w in parsed.warnings)
     frag = fragments_of(parsed)[0]
     assert frag.locator.page == 1 and frag.locator.bbox == (10.0, 10.0, 200.0, 40.0)
 

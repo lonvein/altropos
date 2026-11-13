@@ -1,0 +1,16 @@
+# VPS template only. Verify host fingerprint and provision a dedicated key first.
+[Unit]
+Description=Private Altropos laptop tunnel
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=altropos-tunnel
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/altropos/gpu_known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i /etc/altropos/tunnel_ed25519 -L 127.0.0.1:18000:127.0.0.1:18000 WINDOWS_USER@GPU_TAILSCALE_HOST
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

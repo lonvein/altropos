@@ -12,6 +12,7 @@ from dataclasses import dataclass
 POINT = re.compile(r"^(\d+(?:\.\d+)*)[.)]?\s+(\S.*)$", re.S)
 APPENDIX = re.compile(r"^приложени[ея](\s*(№|N)\s*[\w.-]+|\s+\d+[\w.-]*)?\s*$|^приложени[ея]\s*(№|N)\s*[\w.-]+(\s|$)", re.I)
 SECTION_WORD = re.compile(r"^(раздел|глава|статья|часть)\s+[\dIVXLC]+", re.I)
+_REQUISITE_APPENDIX_RE = re.compile(r"\b(?:к\s+приказ\w*|к\s+распоряжени\w*|утвержден\w*)\b", re.I)
 
 
 def is_upper_heading(text: str) -> bool:
@@ -38,16 +39,21 @@ class Outline:
     def path(self) -> tuple[str, ...]:
         return tuple(x for x in (self.top, self.sub) if x)
 
-    def feed(self, text: str, style_heading: bool = False) -> Classified:
+    def feed(self, text: str, style_heading: bool = False, list_item: bool = False) -> Classified:
+        if list_item or re.match(r"^[•●▪—–]\s", text):
+            self._expect_appendix_title = False
+            return Classified("paragraph", "", self.path)
         point = POINT.match(text)
-        if self._expect_appendix_title and not point:
+        if self._expect_appendix_title and not point and not _REQUISITE_APPENDIX_RE.search(text):
             self._expect_appendix_title = False
             self.top = f"{self.top}. {text}" if self.top else text
             return Classified("heading", "", self.path)
         self._expect_appendix_title = False
         if (APPENDIX.match(text) or SECTION_WORD.match(text)) and len(text) < 120 and not point:
             self.top, self.sub = text, ""
-            self._expect_appendix_title = bool(APPENDIX.match(text)) and len(text) < 40
+            self._expect_appendix_title = (
+                bool(APPENDIX.match(text)) and len(text) < 40 and not _REQUISITE_APPENDIX_RE.search(text)
+            )
             return Classified("heading", "", self.path)
         if style_heading or (is_upper_heading(text) and not point):
             self.top, self.sub = text, ""
@@ -55,7 +61,10 @@ class Outline:
         if point:
             section = point.group(1)
             depth = section.count(".") + 1
-            if depth == 1 and len(text) <= 100 and not text.rstrip().endswith((".", ";", ":", ",")):
+            # A numbered enumeration is content even if its short label looks
+            # like a section title. Do not replace context with each list item.
+            enumeration = bool(re.match(r"^\d+\)\s", text))
+            if not enumeration and depth == 1 and len(text) <= 100 and not text.rstrip().endswith((".", ";", ":", ",")):
                 self.sub = text
                 return Classified("heading", section, self.path)
             return Classified("paragraph", section, self.path)

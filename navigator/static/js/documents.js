@@ -206,8 +206,9 @@
         return path;
       }
     }
-    if (typeof doc.fragment_id === "string" && doc.fragment_id) {
-      return `/api/sources/${encodeURIComponent(doc.fragment_id)}`;
+    // A fragment is a citation, not a complete document representation.
+    if (doc.status === "ready" && typeof doc.id === "string" && doc.id) {
+      return `/api/documents/${encodeURIComponent(doc.id)}/view`;
     }
     return null;
   }
@@ -228,6 +229,10 @@
   function renderDocuments() {
     A.clear(documentsList);
     A.show(documentsEmpty, documents.length === 0);
+    const ready = documents.filter((doc) => doc.status === "ready").length;
+    const review = documents.filter((doc) => doc.status === "needs_review").length;
+    const errors = documents.filter((doc) => ["failed", "error"].includes(doc.status)).length;
+    A.setText(documentsStatus, `Всего: ${documents.length}. Доступно для поиска: ${ready}. Требуют проверки: ${review}. Ошибок: ${errors}.`);
     documents.forEach((doc) => {
       if (!doc || typeof doc !== "object") {
         return;
@@ -241,6 +246,7 @@
       const originalLink = fragment.querySelector(".document-card__original");
       const presentationLink = fragment.querySelector(".document-card__presentation");
       const metadataButton = fragment.querySelector(".document-card__metadata");
+      const retryButton = fragment.querySelector(".document-card__retry");
       const root = fragment.querySelector(".document-card");
 
       const title = doc.title || doc.name || "Документ без названия";
@@ -283,6 +289,8 @@
       fillDetail(fragment, "validity", validity.join(" "));
       if (metadata.reviewed === true) {
         fillDetail(fragment, "reviewed", "подтверждена администратором");
+      } else if (status === "ready") {
+        fillDetail(fragment, "reviewed", "пройдена");
       } else if (metadata.reviewed === false) {
         fillDetail(fragment, "reviewed", "не подтверждена");
       }
@@ -313,12 +321,91 @@
       }
 
       metadataButton.addEventListener("click", () => openMetadata(doc));
+      if (retryButton && ["needs_review", "failed", "error"].includes(status)) {
+        A.show(retryButton, true);
+        retryButton.addEventListener("click", async () => {
+          retryButton.disabled = true;
+          A.setText(retryButton, "Постановка в очередь…");
+          try {
+            await A.apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/retry`, { method: "POST" });
+            await fetchDocuments({ silent: true });
+          } catch (error) {
+            A.setText(retryButton, "Не удалось повторить — попробуйте ещё раз");
+            retryButton.disabled = false;
+          }
+        });
+      }
       if (status === "needs_review") {
         root.classList.add("document-card--review");
       }
       documentsList.appendChild(fragment);
     });
   }
+
+  const docStateKey = "altropos.documents.uiState.v1";
+  let scrollRestored = false;
+
+  try {
+    window.sessionStorage.setItem(
+      "altropos.review.returnUrl",
+      `${window.location.pathname}${window.location.search}`,
+    );
+  } catch {
+    // Игнорируем ошибку sessionStorage.
+  }
+
+  function saveDocumentsUiState() {
+    try {
+      const fields = {};
+      document.querySelectorAll("input[id], textarea[id], select[id]").forEach((el) => {
+        if (el.type === "file") {
+          return;
+        }
+        fields[el.id] = el.type === "checkbox" ? el.checked : el.value;
+      });
+      window.sessionStorage.setItem(
+        docStateKey,
+        JSON.stringify({
+          scrollY: window.scrollY || window.pageYOffset || 0,
+          fields,
+        }),
+      );
+    } catch {
+      // Игнорируем ошибку sessionStorage.
+    }
+  }
+
+  function restoreDocumentsUiState() {
+    try {
+      const raw = window.sessionStorage.getItem(docStateKey);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.fields && typeof parsed.fields === "object") {
+        Object.entries(parsed.fields).forEach(([id, val]) => {
+          const el = document.getElementById(id);
+          if (!el || el.type === "file") {
+            return;
+          }
+          if (el.type === "checkbox") {
+            el.checked = Boolean(val);
+          } else if (typeof val === "string" && !el.value) {
+            el.value = val;
+          }
+        });
+      }
+      if (!scrollRestored && parsed && typeof parsed.scrollY === "number" && parsed.scrollY > 0) {
+        scrollRestored = true;
+        window.requestAnimationFrame(() => window.scrollTo(0, parsed.scrollY));
+      }
+    } catch {
+      // Игнорируем ошибку sessionStorage.
+    }
+  }
+
+  window.addEventListener("pagehide", saveDocumentsUiState);
+  window.addEventListener("beforeunload", saveDocumentsUiState);
 
   async function fetchDocuments(options = {}) {
     const silent = Boolean(options.silent);
@@ -332,6 +419,7 @@
       A.show(documentsError, false);
       A.show(documentsLoading, false);
       renderDocuments();
+      restoreDocumentsUiState();
       scheduleRefresh();
     } catch (error) {
       A.show(documentsLoading, false);

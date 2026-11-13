@@ -171,6 +171,74 @@ def test_changed_original_requires_new_upload(service):
     assert service.store.active_publications() == []
 
 
+def test_full_view_and_citation_preserve_all_published_fragments(service):
+    # Artificial long text forces multiple search fragments. The final paragraph
+    # must remain accessible from both document cards and a middle citation.
+    paragraphs = [f'<p>ARTIFICIAL paragraph {i}: ' + ('readable source text ' * 80) + '</p>'
+                  for i in range(12)]
+    paragraphs.append('<p>ARTIFICIAL FINAL MARKER &lt;script&gt;unsafe&lt;/script&gt; &amp; end.</p>')
+    uploaded = service.upload_file('complete.html', ''.join(paragraphs).encode())
+    assert service.process_next_job()
+    fragments = service.store.active_publications()[0][1]
+    assert len(fragments) > 2
+    selected = fragments[len(fragments) // 2]
+    document_id = uploaded['document_id']
+    with TestClient(create_app(document_service=service)) as client:
+        document = next(d for d in client.get('/api/documents').json()['documents'] if d['id'] == document_id)
+        assert document['presentation_url'] == f'/api/documents/{document_id}/view'
+        for path in [document['presentation_url'], f'/api/sources/{selected.id}']:
+            response = client.get(path)
+            assert response.status_code == 200
+            assert 'ARTIFICIAL FINAL MARKER' in response.text
+            assert '&lt;script&gt;unsafe&lt;/script&gt;' in response.text
+            assert '<script>' not in response.text
+            # Canonical blocks appear once, without chunk overlap or search headers.
+            assert response.text.count("ARTIFICIAL FINAL MARKER") == 1
+            assert 'sandbox' in response.headers['content-security-policy']
+            assert response.headers['x-content-type-options'] == 'nosniff'
+        citation = client.get(f'/api/sources/{selected.id}').text
+        assert f'source-fragment--selected" id="fragment-{selected.id}"' in citation
+        service.store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (document_id,))
+        assert client.get(document['presentation_url']).status_code == 404
+        assert client.get(f'/api/sources/{selected.id}').status_code == 404
+        assert client.get('/api/documents/missing/view').status_code == 404
+
+
+@pytest.mark.parametrize('extension', ['docx', 'xlsx'])
+def test_full_view_exposes_final_content_of_office_documents(service, extension):
+    from io import BytesIO
+    content = BytesIO()
+    final = 'ARTIFICIAL FINAL OFFICE MARKER'
+    if extension == 'docx':
+        from docx import Document
+        document = Document()
+        for i in range(12):
+            document.add_paragraph(f'ARTIFICIAL paragraph {i}: ' + 'readable body ' * 80)
+        document.add_paragraph(final)
+        document.save(content)
+    else:
+        from openpyxl import Workbook
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = 'Artificial'
+        for i in range(30):
+            sheet.append([f'ARTIFICIAL row {i}', 'readable cell ' * 40])
+        sheet.append([final, 'end'])
+        workbook.save(content)
+        workbook.close()
+    uploaded = service.upload_file(f'artificial.{extension}', content.getvalue())
+    assert service.process_next_job()
+    assert service.get_document(uploaded['document_id'])['status'] == 'ready'
+    fragments = service.store.active_publications()[0][1]
+    assert len(fragments) > 1
+    with TestClient(create_app(document_service=service)) as client:
+        response = client.get(f"/api/documents/{uploaded['document_id']}/view")
+        assert response.status_code == 200
+        assert final in response.text
+        assert response.text.count(final) == 1
+        assert ("<table>" in response.text) == (extension == "xlsx")
+
+
 def test_production_discovers_real_documents_and_env_demo_is_explicit(monkeypatch):
     monkeypatch.delenv('UI_SYNTHETIC_FALLBACK', raising=False)
     assert create_app().state.integration['documents']['mode'] == 'real'
@@ -178,3 +246,54 @@ def test_production_discovers_real_documents_and_env_demo_is_explicit(monkeypatc
     monkeypatch.setenv('UI_SYNTHETIC_FALLBACK', 'true')
     assert create_app().state.integration['documents']['mode'] == 'synthetic'
     assert create_app(synthetic_fallback=False).state.integration['documents']['mode'] == 'real'
+
+
+@pytest.mark.parametrize('kind', ['pdf', 'docx', 'xlsx'])
+def test_canonical_blocks_survive_search_filtering_and_cache_changes(service, monkeypatch, kind):
+    """A full viewer must not be reconstructed from search-selected units."""
+    from navigator.ingestion.model import Parsed
+    from navigator.ingestion.common import FragmentDraft
+    from navigator.documents import service as module
+    loc = {'pdf': {'kind': 'pdf', 'page': 1},
+           'docx': {'kind': 'docx', 'block': 1},
+           'xlsx': {'kind': 'xlsx', 'sheet': 'Artificial', 'range': 'A1:B3'}}[kind]
+    omitted = 'ARTIFICIAL UNINDEXED CONTENT <script>unsafe</script>'
+    if kind == 'pdf':
+        blocks = [{'page': 1, 'text': omitted}, {'page': 1, 'table': [['A', 'B'], ['C', 'D']]},
+                  {'page': 2, 'text': 'ARTIFICIAL FINAL PAGE'}]
+    elif kind == 'docx':
+        blocks = [{'index': 0, 'kind': 'paragraph', 'text': omitted},
+                  {'index': 1, 'kind': 'table', 'rows': [['A', 'B'], ['C', 'D']]},
+                  {'index': 2, 'kind': 'paragraph', 'text': 'ARTIFICIAL FINAL PAGE'}]
+    else:
+        blocks = [{'sheet': 'Artificial', 'rows': [
+            {'row': 1, 'cells': [{'col': 1, 'text': omitted}, {'col': 2, 'text': 'B'}]},
+            {'row': 3, 'cells': [{'col': 2, 'text': 'ARTIFICIAL FINAL PAGE'}]}]}]
+    parsed = Parsed(media_type=kind, title='Artificial canonical source', blocks=blocks,
+                    drafts=[FragmentDraft(text='ARTIFICIAL searchable evidence', section='', locator=loc)])
+    monkeypatch.setattr(module, 'parse_file', lambda *args, **kwargs: parsed)
+    upload = service.upload_file(f'artificial.{kind}', b'ARTIFICIAL FIXTURE')
+    service.process_next_job()
+    doc_id = upload['document_id']
+    assert service.get_document(doc_id)['status'] == 'ready'
+    assert omitted not in service.store.active_publications()[0][1][0].text
+    # An unverified cache is irrelevant to the published presentation.
+    service.storage.save_extracted_blocks(doc_id, [{'text': 'MUTABLE CACHE INJECTION'}])
+    with TestClient(create_app(document_service=service)) as client:
+        path = f'/api/documents/{doc_id}/view'
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.text.count(escape(omitted)) == 1
+        assert 'ARTIFICIAL FINAL PAGE' in response.text
+        assert '<table>' in response.text
+        assert '<script>' not in response.text
+        assert 'MUTABLE CACHE INJECTION' not in response.text
+        assert response.text.index(escape(omitted)) < response.text.index('ARTIFICIAL FINAL PAGE')
+        if kind == 'pdf':
+            assert 'Страница 1' in response.text and 'Страница 2' in response.text
+        if kind == 'xlsx':
+            assert '<tr><td rowspan="1" colspan="1"></td><td rowspan="1" colspan="1"></td></tr>' in response.text
+        service.store.execute("UPDATE presentation_snapshots SET blocks='[]' WHERE document_id=?", (doc_id,))
+        assert client.get(path).status_code == 409
+        service.store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (doc_id,))
+        assert client.get(path).status_code == 404

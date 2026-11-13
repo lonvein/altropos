@@ -51,10 +51,66 @@
   const sourceMessage = document.getElementById("source-message");
 
   const draftKey = "altropos.ask.draft.v1";
+  const jobStateKey = "altropos.ask.job.v1";
   const maxQuestion = Number(form.dataset.maxQuestion) || 4000;
   const timeoutSeconds = Number(form.dataset.timeoutSeconds) || 105;
   const sourceById = new Map();
   let currentController = null;
+  let activePollRun = 0;
+  let isUnloading = false;
+  let userCancelled = false;
+
+  window.addEventListener("pagehide", () => {
+    isUnloading = true;
+  });
+  window.addEventListener("beforeunload", () => {
+    isUnloading = true;
+  });
+
+  function generateRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  }
+
+  try {
+    window.sessionStorage.setItem(
+      "altropos.review.returnUrl",
+      `${window.location.pathname}${window.location.search}`,
+    );
+  } catch {
+    // Игнорируем недоступность sessionStorage.
+  }
+
+  function saveJobState(entry) {
+    try {
+      window.sessionStorage.setItem(jobStateKey, JSON.stringify(entry));
+    } catch {
+      // Игнорируем недоступность sessionStorage.
+    }
+  }
+
+  function readJobState() {
+    try {
+      const raw = window.sessionStorage.getItem(jobStateKey);
+      if (!raw) {
+        return null;
+      }
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearJobState() {
+    try {
+      window.sessionStorage.removeItem(jobStateKey);
+    } catch {
+      // Игнорируем ошибку хранилища.
+    }
+  }
 
   function saveDraft() {
     try {
@@ -393,6 +449,136 @@
   });
   asOf.addEventListener("change", saveDraft);
 
+  async function pollAskJob(requestId, questionText, asOfValue, startedAt) {
+    const pollRun = ++activePollRun;
+    const deadlineMs = Math.max(10, timeoutSeconds) * 1000;
+    const originMs = typeof startedAt === "number" ? startedAt : Date.now();
+    userCancelled = false;
+    setLoading(true);
+    A.setText(state, "Запрос выполняется на сервере… Ответ сохранится даже при переходе на другую вкладку.");
+
+    while (pollRun === activePollRun && !isUnloading && !userCancelled) {
+      if (Date.now() - originMs > deadlineMs + 15000) {
+        showRequestError(
+          "Превышено время ожидания ответа. Вопрос сохранён; повторите проверку или отправку позже.",
+        );
+        saveJobState({
+          requestId,
+          question: questionText,
+          asOf: asOfValue || "",
+          status: "error",
+          startedAt: originMs,
+          errorMessage: "Превышено время ожидания ответа.",
+        });
+        A.setText(state, "Запрос завершился ошибкой.");
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const statusData = await A.apiFetch(`/api/ask/status/${encodeURIComponent(requestId)}`, {
+          method: "GET",
+        });
+        if (pollRun !== activePollRun || isUnloading || userCancelled) {
+          return;
+        }
+        if (statusData && statusData.status === "completed" && statusData.result) {
+          saveJobState({
+            requestId: statusData.request_id || requestId,
+            question: questionText,
+            asOf: asOfValue || "",
+            status: "completed",
+            startedAt: originMs,
+            result: statusData.result,
+          });
+          clearRequestError();
+          renderAnswer(statusData.result);
+          A.setText(state, "Ответ получен.");
+          setLoading(false);
+          return;
+        }
+        if (statusData && statusData.status === "error") {
+          const message =
+            (statusData.error && statusData.error.message) ||
+            "Не удалось обработать запрос.";
+          saveJobState({
+            requestId: statusData.request_id || requestId,
+            question: questionText,
+            asOf: asOfValue || "",
+            status: "error",
+            startedAt: originMs,
+            errorMessage: message,
+          });
+          showRequestError(message);
+          A.setText(state, "Запрос завершился ошибкой.");
+          setLoading(false);
+          return;
+        }
+      } catch (pollError) {
+        if (pollError && pollError.status === 404) {
+          clearJobState();
+          showRequestError(
+            "Запрос не найден на сервере (возможно, сервер был перезапущен). Нажмите «Найти ответ» для повторной отправки.",
+          );
+          A.setText(state, "Требуется повторная отправка.");
+          setLoading(false);
+          return;
+        }
+      }
+      await A.delay(800);
+    }
+  }
+
+  async function restoreAskState() {
+    const saved = readJobState();
+    if (saved) {
+      if (typeof saved.question === "string" && !question.value) {
+        question.value = saved.question;
+      }
+      if (typeof saved.asOf === "string" && !asOf.value) {
+        asOf.value = saved.asOf;
+      }
+      if (saved.status === "running" && saved.requestId) {
+        await pollAskJob(saved.requestId, saved.question || question.value, saved.asOf || "", saved.startedAt);
+        return;
+      }
+      if (saved.status === "completed" && saved.result) {
+        renderAnswer(saved.result);
+        A.setText(state, "Ответ получен.");
+        return;
+      }
+      if (saved.status === "error" && saved.errorMessage) {
+        showRequestError(saved.errorMessage);
+        A.setText(state, "Запрос завершился ошибкой.");
+        return;
+      }
+    }
+
+    try {
+      const data = await A.apiFetch("/api/ask/active", { method: "GET" });
+      const active = data && data.active ? data.active : null;
+      if (active && active.status === "running" && active.request_id) {
+        if (typeof active.question === "string") {
+          question.value = active.question;
+        }
+        if (typeof active.as_of === "string") {
+          asOf.value = active.as_of;
+        }
+        saveDraft();
+        saveJobState({
+          requestId: active.request_id,
+          question: question.value,
+          asOf: asOf.value || "",
+          status: "running",
+          startedAt: Date.now(),
+        });
+        await pollAskJob(active.request_id, question.value, asOf.value || "", Date.now());
+      }
+    } catch {
+      // Эндпоинт /api/ask/active может отсутствовать в синтетических тестах UI.
+    }
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearFieldError();
@@ -410,14 +596,38 @@
       return;
     }
 
-    const payload = { question: value };
-    if (asOf.value) {
-      payload.as_of = asOf.value;
+    const asOfValue = asOf.value || "";
+    const existing = readJobState();
+    if (
+      existing &&
+      existing.status === "running" &&
+      existing.requestId &&
+      existing.question === value &&
+      (existing.asOf || "") === asOfValue
+    ) {
+      await pollAskJob(existing.requestId, value, asOfValue, existing.startedAt);
+      return;
     }
+
+    const payload = { question: value };
+    if (asOfValue) {
+      payload.as_of = asOfValue;
+    }
+    const requestId = generateRequestId();
+    const startedAt = Date.now();
+    userCancelled = false;
+    activePollRun++;
     saveDraft();
     clearAnswer();
+    saveJobState({
+      requestId,
+      question: value,
+      asOf: asOfValue,
+      status: "running",
+      startedAt,
+    });
     setLoading(true);
-    A.setText(state, "Ищу ответ… Это может занять до минуты.");
+    A.setText(state, "Ищу ответ… Обработка продолжится на сервере даже при переключении вкладки.");
 
     const controller = new AbortController();
     currentController = controller;
@@ -427,21 +637,66 @@
       controller.abort();
     }, Math.max(10, timeoutSeconds) * 1000);
 
+    let recoveringViaPoll = false;
     try {
       const data = await A.apiFetch("/api/ask", {
         method: "POST",
+        headers: { "X-Request-Id": requestId },
         json: payload,
         signal: controller.signal,
+      });
+      if (isUnloading || userCancelled) {
+        return;
+      }
+      saveJobState({
+        requestId,
+        question: value,
+        asOf: asOfValue,
+        status: "completed",
+        startedAt,
+        result: data,
       });
       renderAnswer(data);
       A.setText(state, "Ответ получен.");
     } catch (error) {
-      if (timedOut || (error && error.name === "AbortError")) {
-        showRequestError(
-          "Превышено время ожидания ответа. Вопрос сохранён; сервер мог продолжить обработку. Повторите отправку вручную позже.",
-        );
+      if (isUnloading || userCancelled) {
+        return;
+      }
+      const isNetworkOrAbort =
+        (error && error.name === "AbortError") ||
+        (error && !error.status);
+      if (isNetworkOrAbort && !timedOut) {
+        recoveringViaPoll = true;
+        window.clearTimeout(timer);
+        if (currentController === controller) {
+          currentController = null;
+        }
+        await pollAskJob(requestId, value, asOfValue, startedAt);
+        return;
+      }
+      if (timedOut) {
+        const msg =
+          "Превышено время ожидания ответа. Вопрос сохранён; сервер мог продолжить обработку. Повторите проверку или отправку позже.";
+        saveJobState({
+          requestId,
+          question: value,
+          asOf: asOfValue,
+          status: "error",
+          startedAt,
+          errorMessage: msg,
+        });
+        showRequestError(msg);
       } else {
-        showRequestError(A.friendlyError(error));
+        const msg = A.friendlyError(error);
+        saveJobState({
+          requestId,
+          question: value,
+          asOf: asOfValue,
+          status: "error",
+          startedAt,
+          errorMessage: msg,
+        });
+        showRequestError(msg);
       }
       A.setText(state, "Запрос завершился ошибкой.");
     } finally {
@@ -449,11 +704,15 @@
       if (currentController === controller) {
         currentController = null;
       }
-      setLoading(false);
+      if (!recoveringViaPoll && !isUnloading) {
+        setLoading(false);
+      }
     }
   });
 
   clearButton.addEventListener("click", () => {
+    userCancelled = true;
+    activePollRun++;
     if (currentController) {
       currentController.abort();
       currentController = null;
@@ -461,6 +720,7 @@
     question.value = "";
     asOf.value = "";
     clearDraft();
+    clearJobState();
     clearFieldError();
     clearRequestError();
     clearAnswer();
@@ -469,4 +729,5 @@
   });
 
   restoreDraft();
+  restoreAskState();
 })();

@@ -120,6 +120,8 @@ def extract_metadata(units: list[Unit], title_hint: str = "", filename: str = ""
 
     for m in _APPENDIX_RE.finditer(header_blob):
         app_sec, target_num = m.groups()
+        if not target_num or (number and target_num.strip().lower() == number.strip().lower()):
+            continue
         key = ("appendix", target_num, app_sec)
         if key not in seen_rel:
             seen_rel.add(key)
