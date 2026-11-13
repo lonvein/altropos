@@ -111,7 +111,7 @@ def test_original_path_cannot_escape_data_dir(service, tmp_path):
         assert response.status_code == 404
         assert 'private' not in response.text
         assert client.post('/api/documents', files={'file': ('bad.exe', b'bad')}).status_code == 422
-        assert client.post('/api/import-url', json={'url': 'https://example.org'}).status_code == 404
+        assert client.post('/api/import-url', json={'url': 'https://example.org'}).status_code == 422
 
 
 def test_indexing_serialized_between_services(service):

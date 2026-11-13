@@ -1,4 +1,4 @@
-"""Real local-document HTTP API; no URL ingestion or synthetic sources.
+"""Real document HTTP API: uploads, restricted mipt.ru import, metadata, and safe source viewer.
 
 Use create_document_router(service), or mount router with app.state.document_service.
 Run document_worker once per application lifespan; indexing stays in a worker thread.
@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from html import escape
 
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from navigator.documents.service import DocumentService
+from navigator.documents.viewer import render_source_html
 from navigator.ingestion.common import ParseError
-from navigator.schemas import Fragment, MetadataPatch
+from navigator.schemas import Fragment, ImportRequest, MetadataPatch
 
 
 def _error(code: str, message: str, status: int) -> JSONResponse:
@@ -93,28 +93,39 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
         return FileResponse(path, media_type="application/octet-stream", filename=row["name"],
                             headers={"X-Content-Type-Options": "nosniff"})
 
+    @api.post("/import-url")
+    def import_url(request: Request, body: ImportRequest):
+        svc = current(request)
+        try:
+            return svc.import_from_url(body.url, body.selected_urls)
+        except ValueError as exc:
+            return _error("invalid_request", str(exc) or "Недопустимый URL для импорта.", 422)
+
     @api.get("/sources/{fragment_id}")
     def source(request: Request, fragment_id: str):
         svc = current(request)
         # Read only active ready publication snapshots, never extracted cache or
         # arbitrary file paths. Works for BM25 and hybrid without loading models.
-        rows = svc.store.rows("""SELECT d.title,p.fragments FROM documents d
+        rows = svc.store.rows("""SELECT d.title, d.metadata, p.fragments FROM documents d
             JOIN publications p ON p.id=d.active_publication WHERE d.status='ready'""")
         for row in rows:
-            for data in json.loads(row["fragments"]):
-                if data["id"] != fragment_id:
-                    continue
-                fragment = Fragment.model_validate(data)
-                title = escape(row["title"])
-                locator = escape(json.dumps(fragment.locator.model_dump(mode="json"), ensure_ascii=False))
-                text = escape(fragment.text)
-                page = (f'<!doctype html><html lang="ru"><meta charset="utf-8">'
-                        f'<title>{title}</title><h1>{title}</h1><p>{locator}</p>'
-                        f'<pre style="white-space:pre-wrap">{text}</pre></html>')
-                return HTMLResponse(page, headers={
-                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox",
-                    "X-Content-Type-Options": "nosniff",
-                })
+            raw_fragments = json.loads(row["fragments"])
+            target_data = next((item for item in raw_fragments if item["id"] == fragment_id), None)
+            if target_data is None:
+                continue
+            target_fragment = Fragment.model_validate(target_data)
+            all_fragments = [Fragment.model_validate(item) for item in raw_fragments]
+            meta = row.get("metadata")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            page = render_source_html(row["title"], target_fragment, all_fragments, metadata=meta)
+            return HTMLResponse(page, headers={
+                "Content-Security-Policy": "default-src 'none'; style-src 'self' 'unsafe-inline'; frame-ancestors 'self'; sandbox",
+                "X-Content-Type-Options": "nosniff",
+            })
         return _error("not_found", "Опубликованный источник не найден.", 404)
 
     return api
