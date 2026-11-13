@@ -173,6 +173,21 @@ POST разрешён только `/api/ask`: точный Origin `https://aitr
 Прямой Tailscale Serve — альтернативный транспорт, не нужен одновременно с SSH-туннелем.
 Если выбран, разрешить VPS только reader-порт, не admin и не модели; Funnel не использовать.
 
+Если существующий Caddy работает в Docker bridge, его 127.0.0.1 относится к контейнеру.
+Upstream должен указывать на проверенный адрес gateway этого bridge, а SSH -L должен
+слушать именно этот адрес VPS. Проверить фактическую сеть через docker inspect;
+не использовать 0.0.0.0 или публичный IP. Доступ к этому порту возможен другим контейнерам
+в той же сети: это граница доверия, которую следует учитывать при изоляции приложений.
+Оригинал Caddyfile сохранить; менять только нужный доменный блок. При bind-mount одного
+файла запись выполнять с сохранением inode, иначе контейнер может продолжить видеть
+старую версию после атомарной замены файла на хосте. Выполнить validate перед reload.
+
+Для Cloudflare-проксирования шаблон использует REQUEST_TIMEOUT=25: общий deadline
+вопроса 4x25=100 s. Caddy ждёт заголовки 110 s, что оставляет запас до стандартного
+Cloudflare Proxy Read Timeout 125 s. Тарифные настройки не считаются проверенными;
+не увеличивать таймауты без проверки внешней цепочки. Более долгие задачи требуют
+асинхронного API/опроса статуса, а не бесконечного ожидания браузера.
+
 ## Копии, обновление, приёмка
 
 Остановить reader/admin; затем:
@@ -208,3 +223,4 @@ Review-каталог хранится отдельно: при необходи
 - [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve)
 - [Tailscale grants](https://tailscale.com/docs/reference/syntax/grants)
 - [Tesseract installation and language data](https://tesseract-ocr.github.io/tessdoc/Installation.html)
+- [Cloudflare 524 and default read timeout](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)

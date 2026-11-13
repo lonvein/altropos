@@ -12,7 +12,7 @@ aitropos.ru {
 			header_up -Authorization
 			transport http {
 				dial_timeout 5s
-				response_header_timeout 380s
+				response_header_timeout 110s
 			}
 		}
 	}
