@@ -206,8 +206,9 @@
         return path;
       }
     }
-    if (typeof doc.fragment_id === "string" && doc.fragment_id) {
-      return `/api/sources/${encodeURIComponent(doc.fragment_id)}`;
+    // A fragment is a citation, not a complete document representation.
+    if (doc.status === "ready" && typeof doc.id === "string" && doc.id) {
+      return `/api/documents/${encodeURIComponent(doc.id)}/view`;
     }
     return null;
   }

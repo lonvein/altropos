@@ -35,7 +35,7 @@ def test_private_routes_denied(path, method):
     assert request(path, method) == 403
 
 
-@pytest.mark.parametrize("path", ["/", "/static/app.js", "/api/sources/id-123", "/api/documents/id/original"])
+@pytest.mark.parametrize("path", ["/", "/static/app.js", "/api/sources/id-123", "/api/documents/id/original", "/api/documents/id/view"])
 def test_reader_routes(path):
     assert request(path) == 200
 

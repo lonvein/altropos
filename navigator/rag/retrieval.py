@@ -56,8 +56,6 @@ def _visible(snapshots, as_of, warnings):
         if meta.reviewed:
             if meta.valid_from and as_of < meta.valid_from or meta.valid_to and as_of > meta.valid_to:
                 continue
-        if not meta.reviewed or meta.valid_from is None:
-            warnings.append(f"Период действия {manifest.document_id} подтверждён не полностью.")
         eligible[manifest.document_id] = (manifest, fragments, meta)
     excluded = {}
     # A repeal is an effective event, not a temporary property of the repealer's
@@ -187,8 +185,15 @@ class Searcher:
                 else:
                     warnings.append("ML недоступен или вернул некорректный ответ; векторная выдача отброшена.")
         limit = min(request.limit, self.settings.top_fragments)
+        selected_ids = _ordered(scores)[:limit]
+        selected_documents = {by_id[key].document_id for key in selected_ids}
+        # Validity notices concern cited results, not every unrelated document in
+        # the corpus. Edition/repeal warnings above still apply to selection itself.
+        for manifest, _, meta in snapshots:
+            if manifest.document_id in selected_documents and (not meta.reviewed or meta.valid_from is None):
+                warnings.append(f"Период действия «{meta.title or manifest.document_id}» подтверждён не полностью.")
         return SearchResult(mode="hybrid" if hybrid else "bm25",
             hits=[SearchHit(fragment=by_id[key], rank=i, score=scores[key], score_kind=score_kind)
-                  for i, key in enumerate(_ordered(scores)[:limit], 1)],
+                  for i, key in enumerate(selected_ids, 1)],
             publication_ids=[m.publication_id for m, _, _ in snapshots],
             warnings=list(dict.fromkeys(warnings)))

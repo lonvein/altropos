@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from html import escape
 
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from navigator.documents.presentation import SOURCE_HEADERS, render_publication
 from navigator.documents.service import DocumentService, InitialCorpusReviewRequired
 from navigator.ingestion.common import ParseError
 from navigator.schemas import Fragment, MetadataPatch
@@ -105,28 +105,29 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
         return FileResponse(path, media_type="application/octet-stream", filename=row["name"],
                             headers={"X-Content-Type-Options": "nosniff"})
 
+    @api.get("/documents/{document_id}/view")
+    def document_view(request: Request, document_id: str):
+        rows = current(request).store.rows("""SELECT d.id,d.title,p.fragments FROM documents d
+            JOIN publications p ON p.id=d.active_publication
+            WHERE d.status='ready' AND d.id=?""", (document_id,))
+        if not rows:
+            return _error("not_found", "Опубликованный документ не найден.", 404)
+        row = rows[0]
+        fragments = [Fragment.model_validate(data) for data in json.loads(row["fragments"])]
+        return HTMLResponse(render_publication(row["title"], row["id"], fragments), headers=SOURCE_HEADERS)
+
     @api.get("/sources/{fragment_id}")
     def source(request: Request, fragment_id: str):
-        svc = current(request)
-        # Read only active ready publication snapshots, never extracted cache or
-        # arbitrary file paths. Works for BM25 and hybrid without loading models.
-        rows = svc.store.rows("""SELECT d.title,p.fragments FROM documents d
+        # Both routes use only active ready snapshots; never a mutable extraction cache.
+        rows = current(request).store.rows("""SELECT d.id,d.title,p.fragments FROM documents d
             JOIN publications p ON p.id=d.active_publication WHERE d.status='ready'""")
         for row in rows:
-            for data in json.loads(row["fragments"]):
-                if data["id"] != fragment_id:
-                    continue
-                fragment = Fragment.model_validate(data)
-                title = escape(row["title"])
-                locator = escape(json.dumps(fragment.locator.model_dump(mode="json"), ensure_ascii=False))
-                text = escape(fragment.text)
-                page = (f'<!doctype html><html lang="ru"><meta charset="utf-8">'
-                        f'<title>{title}</title><h1>{title}</h1><p>{locator}</p>'
-                        f'<pre style="white-space:pre-wrap">{text}</pre></html>')
-                return HTMLResponse(page, headers={
-                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox",
-                    "X-Content-Type-Options": "nosniff",
-                })
+            data = json.loads(row["fragments"])
+            if not any(item["id"] == fragment_id for item in data):
+                continue
+            fragments = [Fragment.model_validate(item) for item in data]
+            return HTMLResponse(render_publication(row["title"], row["id"], fragments, fragment_id),
+                                headers=SOURCE_HEADERS)
         return _error("not_found", "Опубликованный источник не найден.", 404)
 
     return api

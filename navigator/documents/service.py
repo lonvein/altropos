@@ -329,6 +329,7 @@ class DocumentService:
             fragment_id = fragments[0]["id"] if fragments else None
         return {
             "fragment_id": fragment_id,
+            "presentation_url": f"/api/documents/{row['id']}/view" if fragment_id else None,
             "id": row["id"],
             "name": row["name"],
             "title": row["title"],

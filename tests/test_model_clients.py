@@ -182,7 +182,8 @@ async def test_llm_profiles_generate_verify(endpoint, settings, fragment, profil
             assert body["chat_template_kwargs"] == {"enable_thinking": False}
             return 200, {"prompt": "synthetic rendered chat"}
         assert path == "/v1/chat/completions"
-        assert body["max_tokens"] == settings.max_output_tokens
+        expected_budget = settings.max_output_tokens if body["response_format"]["schema"]["title"] == "Draft" else min(settings.max_output_tokens, 512)
+        assert body["max_tokens"] == expected_budget
         assert body["model"] == settings.llm_model
         assert body["reasoning_effort"] == "none"
         assert body["chat_template_kwargs"] == {"enable_thinking": False}
@@ -200,6 +201,30 @@ async def test_llm_profiles_generate_verify(endpoint, settings, fragment, profil
     assert generated == draft
     assert verified.supported and not verified.complete
     assert [path for path, _ in calls].count("/v1/chat/completions") == 2
+
+
+@pytest.mark.parametrize("configured_limit", [128, 768])
+@pytest.mark.parametrize("finish", ["stop", "length"])
+async def test_verification_uses_its_own_output_reserve(endpoint, settings, fragment, configured_limit, finish):
+    settings.max_output_tokens = configured_limit
+    draft = Draft(status="partial", summary=[{"text": "Заявка подаётся координатору.",
+        "evidence": [{"fragment_id": fragment.id, "quote": "Заявка подаётся координатору."}]}])
+    def respond(path, body):
+        if path == "/tokenize":
+            return 200, {"tokens": [1] * (settings.context_size - 600 if body["content"] == "large draft" else 1)}
+        if path == "/apply-template":
+            return 200, {"prompt": "large draft"}
+        assert body["max_tokens"] == min(configured_limit, 512)
+        return 200, llm_response(json.dumps({"supported": True, "complete": False}), finish)
+    settings.llm_url = endpoint(respond)
+    request = VerificationRequest(question="Как подать заявку?", fragments=[fragment], draft=draft)
+    if finish == "length":
+        with pytest.raises(ComponentError) as exc:
+            await LLMClient(settings).verify(request)
+        assert_code(exc, "invalid_model_output")
+    else:
+        result = await LLMClient(settings).verify(request)
+        assert result.supported and not result.complete
 
 
 @pytest.mark.parametrize("defect", ["json", "schema", "truncated", "quote", "id", "bool", "envelope"])
