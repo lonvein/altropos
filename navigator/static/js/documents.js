@@ -228,6 +228,10 @@
   function renderDocuments() {
     A.clear(documentsList);
     A.show(documentsEmpty, documents.length === 0);
+    const ready = documents.filter((doc) => doc.status === "ready").length;
+    const review = documents.filter((doc) => doc.status === "needs_review").length;
+    const errors = documents.filter((doc) => ["failed", "error"].includes(doc.status)).length;
+    A.setText(documentsStatus, `Всего: ${documents.length}. Доступно для поиска: ${ready}. Требуют проверки: ${review}. Ошибок: ${errors}.`);
     documents.forEach((doc) => {
       if (!doc || typeof doc !== "object") {
         return;
@@ -241,6 +245,7 @@
       const originalLink = fragment.querySelector(".document-card__original");
       const presentationLink = fragment.querySelector(".document-card__presentation");
       const metadataButton = fragment.querySelector(".document-card__metadata");
+      const retryButton = fragment.querySelector(".document-card__retry");
       const root = fragment.querySelector(".document-card");
 
       const title = doc.title || doc.name || "Документ без названия";
@@ -313,6 +318,20 @@
       }
 
       metadataButton.addEventListener("click", () => openMetadata(doc));
+      if (retryButton && ["needs_review", "failed", "error"].includes(status)) {
+        A.show(retryButton, true);
+        retryButton.addEventListener("click", async () => {
+          retryButton.disabled = true;
+          A.setText(retryButton, "Постановка в очередь…");
+          try {
+            await A.apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/retry`, { method: "POST" });
+            await fetchDocuments({ silent: true });
+          } catch (error) {
+            A.setText(retryButton, "Не удалось повторить — попробуйте ещё раз");
+            retryButton.disabled = false;
+          }
+        });
+      }
       if (status === "needs_review") {
         root.classList.add("document-card--review");
       }

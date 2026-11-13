@@ -59,6 +59,10 @@ def _llm_status(settings: Settings) -> tuple[dict[str, Any], str | None]:
 
 
 async def build_health(settings: Settings, integration: dict[str, Any]) -> dict[str, Any]:
+    from navigator.ingestion.ocr import ocr_status
+    ocr = await asyncio.to_thread(ocr_status, tesseract_cmd=settings.tesseract_cmd,
+                                 tessdata_dir=settings.tessdata_prefix)
+    ocr.pop("tessdata", None)
     ml, ml_reason = _ml_status(settings)
     llm, llm_reason = _llm_status(settings)
 
@@ -82,6 +86,9 @@ async def build_health(settings: Settings, integration: dict[str, Any]) -> dict[
     llm.pop("url", None)
 
     reasons: list[str] = list(integration.get("reasons") or [])
+    if not ocr.get("available"):
+        reasons.append("OCR недоступен: сканированные страницы не будут опубликованы. "
+                       + ocr.get("reason", "Проверьте настройку Tesseract rus+eng."))
     if ml_reason:
         reasons.append(ml_reason)
     if llm_reason:
@@ -112,6 +119,8 @@ async def build_health(settings: Settings, integration: dict[str, Any]) -> dict[
         application_status = "ok"
 
     overall = "ok"
+    if application_status == "ok" and not ocr.get("available"):
+        application_status = "limited"
     if application_status == "degraded":
         overall = "degraded"
     elif application_status == "limited":
@@ -128,5 +137,6 @@ async def build_health(settings: Settings, integration: dict[str, Any]) -> dict[
         },
         "ml": ml,
         "llm": llm,
+        "ocr": ocr,
         "reasons": list(dict.fromkeys(reason for reason in reasons if reason)),
     }

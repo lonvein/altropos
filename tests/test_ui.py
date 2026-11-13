@@ -26,7 +26,11 @@ def wait_for_job(client: TestClient, job_id: str, timeout: float = 5.0) -> dict:
 
 
 @pytest.fixture()
-def client() -> TestClient:
+def client(tmp_path, monkeypatch) -> TestClient:
+    from navigator.config import Settings
+    settings = Settings(_env_file=None, profile="development", data_dir=tmp_path,
+                        llm_enabled=False, ml_enabled=False)
+    monkeypatch.setattr("navigator.main.get_settings", lambda: settings)
     app = create_app(synthetic_fallback=True)
     with TestClient(app) as test_client:
         yield test_client

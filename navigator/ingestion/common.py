@@ -47,6 +47,8 @@ class Unit:
     table_header: str = ""  # шапка таблицы, повторяется при делении
     rows: list[str] | None = None  # для таблиц: строки без шапки
     row_locators: list[dict] | None = None  # локатор каждой строки (XLSX: диапазон ячеек)
+    note_refs: tuple[str, ...] = ()  # explicit source markers
+    note_id: str = ""
 
 
 @dataclass
@@ -131,7 +133,7 @@ def merge_locators(locators: list[dict]) -> dict:
     return first
 
 
-def build_fragments(units: list[Unit]) -> list[FragmentDraft]:
+def _build_fragments(units: list[Unit]) -> list[FragmentDraft]:
     """Упаковывает Unit в черновики фрагментов. Порядок сохраняется.
 
     Правила: цепочка заголовков (path) добавляется первой строкой каждого фрагмента;
@@ -196,19 +198,67 @@ def build_fragments(units: list[Unit]) -> list[FragmentDraft]:
     return drafts
 
 
+def build_fragments(units: list[Unit]) -> list[FragmentDraft]:
+    """Keep explicitly linked notes beside their grounds, including split tables."""
+    drafts = _build_fragments(units)
+    # Consecutive headings and a heading at EOF may never become a path of a
+    # content fragment. Keep such source text rather than silently dropping it.
+    missing = [FragmentDraft(text=u.text, section=u.section, locator=dict(u.locator), units=[i])
+               for i, u in enumerate(units) if u.kind == "heading" and u.text.strip()
+               and not any(u.text in d.text for d in drafts)]
+    drafts = sorted(drafts + missing, key=lambda d: min(d.units))
+    notes = {u.note_id: (i, u) for i, u in enumerate(units) if u.note_id}
+    result = []
+    for draft in drafts:
+        grounds = draft.units + [i for i, unit in enumerate(units)
+                                  if unit.kind == "heading" and unit.text in draft.text]
+        refs = dict.fromkeys(ref for i in grounds for ref in units[i].note_refs)
+        linked = [notes[ref] for ref in refs if ref in notes and notes[ref][0] not in draft.units]
+        if not linked:
+            result.append(draft)
+            continue
+        suffix = "\n" + "\n".join(u.text for _, u in linked)
+        indices = draft.units + [i for i, _ in linked]
+        if len(suffix) >= MAX_CHARS - 200:
+            draft.warnings.append("Сноска слишком велика для совместного фрагмента; см. отдельную сноску")
+            result.append(draft)
+            continue
+        prefix = ''
+        body = draft.text
+        table = next((units[i] for i in draft.units if units[i].kind == 'table'), None)
+        if table:
+            prefix = '\n'.join(s for s in (_header_line(table.path), table.table_header) if s)
+            if prefix and body.startswith(prefix+'\n'):
+                body = body[len(prefix)+1:]
+                prefix += '\n'
+            else:
+                prefix = ''
+        if len(prefix)+len(suffix) > MAX_CHARS-200:
+            draft.warnings.append('Шапка и сноска слишком велики для совместного фрагмента')
+        for piece in _split_long_text(body, reserve=len(suffix)+len(prefix)):
+            result.append(FragmentDraft(text=prefix+piece+suffix, section=draft.section,
+                                        locator=draft.locator.copy(), units=indices,
+                                        warnings=list(draft.warnings)))
+    return result
+
+
 def _table_drafts(index: int, unit: Unit) -> list[FragmentDraft]:
     header = _header_line(unit.path)
     prefix = "\n".join(x for x in (header, unit.table_header) if x)
     rows = unit.rows or [unit.text]
     row_locs = unit.row_locators or [unit.locator] * len(rows)
+    if len(row_locs) != len(rows):
+        raise ParseError('Число строк таблицы не совпадает с числом локаторов')
     drafts: list[FragmentDraft] = []
     group: list[str] = []
     group_locs: list[dict] = []
 
     def make(text_rows: list[str], locs: list[dict]):
         body = "\n".join(text_rows)
-        drafts.append(FragmentDraft(text=f"{prefix}\n{body}" if prefix else body, section=unit.section,
-                                    locator=merge_locators(locs), units=[index]))
+        text = f"{prefix}\n{body}" if prefix else body
+        warnings = ['Шапка таблицы превышает бюджет фрагмента'] if len(text) > MAX_CHARS else []
+        drafts.append(FragmentDraft(text=text, section=unit.section,
+                                    locator=merge_locators(locs), units=[index], warnings=warnings))
 
     def emit():
         if group:

@@ -1,0 +1,24 @@
+# Integration template: do not replace an existing VPS proxy configuration.
+# Requires SSH local forwarding on VPS 127.0.0.1:18000 -> laptop 127.0.0.1:18000.
+aitropos.ru {
+	route {
+		basic_auth {
+			{$ALTROPOS_READER_USER} {$ALTROPOS_READER_HASH}
+		}
+		request_body {
+			max_size 32KB
+		}
+		reverse_proxy 127.0.0.1:18000 {
+			header_up -Authorization
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 110s
+			}
+		}
+	}
+	handle_errors {
+		@unavailable expression {err.status_code} >= 500
+		respond @unavailable "Altropos temporarily unavailable. Please try again later." 503
+		respond "{err.status_text}" {err.status_code}
+	}
+}

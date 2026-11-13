@@ -92,7 +92,8 @@ class AnswerPipeline:
             result = await self.searcher.search(SearchRequest(
                 question=request.question, as_of=as_of, limit=self.settings.top_fragments))
             # Revalidate injected adapters too; do not trust constructed models.
-            payload = result.model_dump(mode="json") if isinstance(result, SearchResult) else result
+            # Python-mode preserves typed locator tuples for strict validation.
+            payload = result.model_dump(mode="python") if isinstance(result, SearchResult) else result
             result = SearchResult.model_validate(payload, strict=True)
             mode, warnings = result.mode, list(result.warnings)
             fragments, sources, rejected = self._sources(result, as_of)

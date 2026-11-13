@@ -14,6 +14,7 @@ from pathlib import Path
 from navigator.ingestion.common import ParseError, Unit
 from navigator.ingestion.model import Parsed
 from navigator.ingestion.outline import Outline
+from navigator.ingestion.ocr import OCRResult
 
 MIN_PAGE_CHARS = 30
 MARGIN_RATIO = 0.07  # доля высоты страницы под колонтитулы
@@ -35,7 +36,9 @@ def _union(lines: list[dict]) -> tuple[float, float, float, float]:
 
 
 def _bbox(box, page) -> list[float] | None:
-    x0, y0, x1, y1 = (round(v, 1) for v in box)
+    origin_x, origin_y = page.bbox[:2]
+    x0, y0, x1, y1 = (round(v - offset, 1) for v, offset in
+                       zip(box, (origin_x, origin_y, origin_x, origin_y)))
     x0, y0 = max(0.0, x0), max(0.0, y0)
     x1, y1 = min(round(float(page.width), 1), x1), min(round(float(page.height), 1), y1)
     return [x0, y0, x1, y1] if x0 < x1 and y0 < y1 else None
@@ -76,8 +79,15 @@ def _page_lines(page, table_boxes) -> list[dict]:
                        "bold": bold, "size": size})
     if result:
         body = Counter(round(l["size"], 1) for l in result).most_common(1)[0][0]
-        for l in result:
-            l["note"] = l["size"] < body - 1.5 and l["top"] > page.height * 0.7
+        previous = None
+        for line in result:
+            marker = re.match(r"^(?:\d+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+|[*†‡]+)\s+", line["text"])
+            point = re.match(r"^\d+[.)]", line["text"])
+            continuation = (previous and previous["note"]
+                            and line["top"]-previous["bottom"] < max(1, previous["bottom"]-previous["top"])*1.2)
+            line["note"] = bool(line["size"] < body - 1.5 and line["top"] > page.height*.7
+                                and not point and (marker or continuation))
+            previous = line
     return result
 
 
@@ -118,13 +128,71 @@ def _margin_noise(pdf) -> set[str]:
     counter: Counter[str] = Counter()
     for page in pdf.pages:
         seen = set()
-        for line in page.extract_text_lines(layout=False, strip=True, return_chars=False):
-            if line["top"] < page.height * MARGIN_RATIO or line["bottom"] > page.height * (1 - MARGIN_RATIO):
+        try:
+            margin_lines = page.extract_text_lines(layout=False, strip=True, return_chars=False)
+        except Exception:
+            continue
+        for line in margin_lines:
+            if line["top"] < page.height * MARGIN_RATIO:
                 text = re.sub(r"\d+", "#", _clean(line["text"]))
                 if text and text not in seen:
                     seen.add(text)
                     counter[text] += 1
     return {t for t, n in counter.items() if n >= max(2, len(pdf.pages) // 2)}
+
+
+def _broken_encoding(text):
+    nonspace = [c for c in text if not c.isspace()]
+    bad = sum(c == "\ufffd" or (0xE000 <= ord(c) <= 0xF8FF and c not in _BULLETS)
+              for c in nonspace)
+    return (bool(re.search(r"\(cid:\d+\)", text)) or bad > 0
+            or (len(nonspace) >= MIN_PAGE_CHARS and sum(c.isalpha() for c in nonspace) < len(nonspace)*.2))
+
+
+def _link_notes(units, blocks, diagnostics):
+    # Only explicit, unique markers on the same page justify a link.
+    superscripts = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+    for index, note in enumerate(units):
+        if note.kind != "note":
+            continue
+        page = note.locator["page"]
+        match = re.match(r"^\s*(\d+|[*†‡]+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s+", note.text)
+        candidates = []
+        if match:
+            marker = match[1]
+            if marker.isascii() and marker.isdigit():
+                pattern = re.compile(r"\["+re.escape(marker)+r"\]|(?<![⁰¹²³⁴⁵⁶⁷⁸⁹])"
+                                     +re.escape(marker.translate(superscripts))+r"(?![⁰¹²³⁴⁵⁶⁷⁸⁹])")
+            else:
+                pattern = re.compile(r"(?<![*†‡⁰¹²³⁴⁵⁶⁷⁸⁹])"+re.escape(marker)+r"(?![*†‡⁰¹²³⁴⁵⁶⁷⁸⁹])")
+            for unit in units[:index]:
+                if unit.kind == "note" or unit.locator.get("page") != page:
+                    continue
+                evidence = [m for b in blocks if b.get("page") == page
+                            and b.get("bbox") == unit.locator.get("bbox")
+                            for m in b.get("reference_markers", [])]
+                literal = bool(pattern.search(unit.text))
+                if all(c in "*†‡" for c in marker):
+                    # A bare asterisk may be multiplication or damaged OCR punctuation.
+                    literal = f"[{marker}]" in unit.text
+                if literal or any(m.get("confirmed") and m["text"] == marker for m in evidence):
+                    candidates.append(unit)
+        note.note_id = f"pdf:{page}:{index}"
+        if len(candidates) == 1:
+            candidates[0].note_refs += (note.note_id,)
+        else:
+            diag = diagnostics[page-1]
+            diag["warnings"].append("Связь сноски с пунктом/таблицей не подтверждена")
+            diag["needs_review"] = True
+        for block in blocks:
+            if block.get("page") == page and block.get("text") == note.text:
+                block.update(kind="note", note_id=note.note_id,
+                             linked=len(candidates) == 1)
+                if len(candidates) != 1:
+                    block["candidate_grounds"] = [
+                        {"bbox": b.get("bbox"), "markers": b["reference_markers"]}
+                        for b in blocks if b.get("page") == page and not b.get("kind") == "note"
+                        and b.get("reference_markers") and b.get("bbox", [0,0,0,0])[1] < note.locator.get("bbox", [0,0,0,0])[1]]
 
 
 def parse_pdf(path: Path, ocr=None) -> Parsed:
@@ -139,6 +207,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
     blocks: list[dict] = []
     warnings: list[str] = []
     needs_review = False
+    diagnostics = []
     outline = Outline()
     ocr_pages: list[int] = []
     unreadable_pages: list[int] = []
@@ -147,24 +216,57 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
             raise ParseError("PDF не содержит страниц")
         noise = _margin_noise(pdf)
         for number, page in enumerate(pdf.pages, start=1):
+            diag = {"page": number, "source": "native", "rotation": 0,
+                    "pdf_rotation": page.rotation, "warnings": [], "confidence": None,
+                    "needs_review": False}
+            diagnostics.append(diag)
             try:
-                text_chars = len((page.extract_text() or "").strip())
+                native_text = (page.extract_text() or "").strip()
             except Exception:
-                text_chars = 0
-            if text_chars < MIN_PAGE_CHARS:
+                native_text = ""
+                diag["warnings"].append("Ошибка чтения текстового слоя")
+            if len(native_text) < MIN_PAGE_CHARS or _broken_encoding(native_text):
                 result = _ocr_page(page, number, ocr)
-                if result is None:
+                diag.update(result.diagnostics)
+                if _broken_encoding(native_text):
+                    diag["warnings"].append("Повреждённая кодировка текстового слоя; использован OCR")
+                if not result:
                     unreadable_pages.append(number)
+                    diag["needs_review"] = True
                     continue
                 ocr_pages.append(number)
                 for item in result:
-                    info = outline.feed(item["text"])
+                    if item.get("suspected_rule"):
+                        blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
+                                       "ocr": True, "kind": "ocr_artifact", "suspected_rule": True})
+                        diag["needs_review"] = True
+                        continue
+                    if item.get("note_continuation") and units and units[-1].kind == "note" \
+                            and units[-1].locator.get("page") == number:
+                        previous = units[-1]
+                        previous_block = next(b for b in reversed(blocks)
+                                              if b.get("page") == number and b.get("text") == previous.text)
+                        previous.text += " " + item["text"]
+                        old, new = previous.locator.get("bbox"), item.get("bbox")
+                        if old and new:
+                            previous.locator["bbox"] = [min(old[0],new[0]),min(old[1],new[1]),
+                                                        max(old[2],new[2]),max(old[3],new[3])]
+                        previous_block.update(text=previous.text, bbox=previous.locator.get("bbox"))
+                        continue
+                    box = item.get("bbox")
+                    is_note = bool(item.get("note"))
+                    info = None if is_note else outline.feed(item["text"], list_item=bool(item.get("list_item")))
                     loc = {"kind": "pdf", "page": number}
                     if item.get("bbox"):
                         loc["bbox"] = item["bbox"]
-                    units.append(Unit(text=item["text"], locator=loc, section=info.section, path=info.path,
-                                      kind=info.kind, atomic=len(item["text"]) < 900))
-                    blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"), "ocr": True})
+                    units.append(Unit(text=item["text"], locator=loc, section=info.section if info else "",
+                                      path=info.path if info else outline.path,
+                                      kind=info.kind if info else "note", atomic=len(item["text"]) < 900))
+                    blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"), "ocr": True,
+                                   "conf": item.get("conf"), "reference_markers": item.get("reference_markers", []),
+                                   "kind": "note" if is_note else info.kind,
+                                   "list_item": bool(item.get("list_item")), "raw_text": item.get("raw_text", item["text"]),
+                                   "layout_corrections": item.get("layout_corrections", [])})
                 continue
 
             table_boxes, tables = [], []
@@ -175,12 +277,19 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                         table_boxes.append(table.bbox)
                         tables.append((table, data))
             except Exception:
-                warnings.append(f"Страница {number}: не удалось определить таблицы")
-            lines = [l for l in _page_lines(page, table_boxes)
-                     if not (re.sub(r"\d+", "#", l["text"]) in noise
+                diag["warnings"].append("Не удалось определить таблицы")
+                diag["needs_review"] = True
+            try:
+                page_lines = _page_lines(page, table_boxes)
+            except Exception:
+                diag.update(source="error", needs_review=True)
+                diag["warnings"].append("Ошибка извлечения строк страницы")
+                continue
+            lines = [l for l in page_lines
+                     if not (not l.get("note") and re.sub(r"\d+", "#", l["text"]) in noise
                              and (l["top"] < page.height * MARGIN_RATIO
                                   or l["bottom"] > page.height * (1 - MARGIN_RATIO)))
-                     and not (re.fullmatch(r"[-–—\s]*\d{1,3}[-–—\s]*", l["text"])
+                     and not (not l.get("note") and re.fullmatch(r"[-–—\s]*\d{1,3}[-–—\s]*", l["text"])
                               and (l["top"] < page.height * MARGIN_RATIO
                                    or l["bottom"] > page.height * (1 - MARGIN_RATIO)))]
             # Абзацы и таблицы идут в порядке вертикального положения на странице
@@ -201,7 +310,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     box = _bbox(_union(para), page)
                     if box:
                         loc["bbox"] = box
-                    if info is None:  # сноска: отдельный фрагмент, не смешивается с основным текстом
+                    if info is None:  # сноска сохраняется и связывается после разбора страницы
                         units.append(Unit(text=text, locator=loc, path=outline.path, kind="note", atomic=True))
                     else:
                         units.append(Unit(text=text, locator=loc, section=info.section, path=info.path,
@@ -223,6 +332,10 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
     finally:
         pdf.close()
 
+    _link_notes(units, blocks, diagnostics)
+    for diag in diagnostics:
+        warnings.extend(f"Страница {diag['page']}: {w}" for w in diag["warnings"])
+        needs_review |= diag.get("needs_review", False)
     if ocr_pages:
         warnings.append(f"Страницы распознаны OCR: {_ranges(ocr_pages)}; текст может содержать ошибки")
     if unreadable_pages:
@@ -232,19 +345,35 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
     if not units:
         needs_review = True
         warnings.append("Из PDF не удалось извлечь текст")
-    return Parsed(media_type="pdf", units=units, blocks=blocks, warnings=warnings, needs_review=needs_review)
+    return Parsed(media_type="pdf", units=units, blocks=blocks, warnings=warnings, needs_review=needs_review,
+                  diagnostics=diagnostics)
 
 
 def _ocr_page(page, number: int, ocr):
-    """None, если страницу нельзя прочитать (OCR отсутствует/пустой результат)."""
+    """Legacy two-argument hooks remain supported; rich hooks receive display size."""
+    diag = {"page": number, "source": "error", "rotation": None,
+            "warnings": [], "confidence": None, "needs_review": True}
     if ocr is None:
-        return None
+        diag["warnings"].append("OCR недоступен")
+        return OCRResult(**diag)
     try:
-        image = page.to_image(resolution=300).original
-        items = ocr(image, number)
+        image = page.to_image(resolution=300, force_mediabox=True).original
+        if getattr(ocr, "supports_page_size", False):
+            items = ocr(image, number, page_size=(float(page.width), float(page.height)))
+        else:
+            items = ocr(image, number)
+        if hasattr(items, "diagnostics"):
+            if not items and image.convert("L").getextrema()[0] > 250:
+                items.diagnostics["source"] = "blank"
+            return items
+        diag.update(source="ocr", needs_review=not bool(items))
+        # Legacy hooks have no orientation/confidence evidence.
+        if not items and image.convert("L").getextrema()[0] > 250:
+            diag["source"] = "blank"
+        return OCRResult(items or (), **diag)
     except Exception:
-        return None
-    return items or None
+        diag["warnings"].append("Не удалось отрисовать или распознать страницу")
+        return OCRResult(**diag)
 
 
 def _ranges(pages: list[int]) -> str:
