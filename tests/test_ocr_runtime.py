@@ -87,7 +87,8 @@ def test_review_pages_are_read_only_and_sandboxed(tmp_path, monkeypatch):
         assert client.get("/review-files/%2e%2e/secret.txt").status_code == 404
 
 
-def test_initial_source_cannot_bypass_approval_by_upload_or_worker(tmp_path):
+@pytest.mark.parametrize("flag", [None, "retry", "reocr", "reprocess"])
+def test_initial_source_cannot_bypass_approval_by_upload_or_worker(tmp_path, flag):
     import json
     from navigator.corpus import create_manifest
     from navigator.documents.service import InitialCorpusReviewRequired
@@ -115,6 +116,10 @@ def test_initial_source_cannot_bypass_approval_by_upload_or_worker(tmp_path):
     service.settings = settings.model_copy(update={"corpus_manifest": None})
     queued = service.upload_file("initial.html", data)
     service.settings = settings
+    if flag:
+        queued_payload = service.queue.get_job(queued["job_id"])["payload"]
+        queued_payload[flag] = True
+        service.store.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps(queued_payload), queued["job_id"]))
     assert service.process_next_job()
     assert service.get_document(queued["document_id"])["status"] == "failed"
     assert len(service.store.active_publications()) == 1

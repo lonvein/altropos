@@ -224,6 +224,7 @@ def create_app(
             "request": request,
             "page": page,
             "integration": app.state.integration,
+            "reader_mode": request.scope.get("altropos.reader", False),
             "profile": settings.profile,
             "max_upload_mb": settings.max_upload_mb,
             "ask_timeout_seconds": int(settings.request_timeout * 4) + 30,

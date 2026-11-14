@@ -32,6 +32,8 @@ def request(path, method="GET", headers=(), body=b"{}"):
     ("/api/documents/id/reocr", "POST"), ("/api/documents/id/retry", "POST"),
     ("/api/import-url", "POST"),
     ("/api/jobs", "GET"), ("/api/jobs/job-1", "GET"),
+    ("/api/ask/active", "GET"), ("/api/ask/active", "HEAD"),
+    ("/api/ask/status/req-123", "GET"), ("/api/ask/status/req-123", "HEAD"),
     ("/openapi.json", "GET"),
     ("/api/sources/../documents", "GET"), ("/static/%2e%2e/secret", "GET"),
     ("/api/future-admin-route", "DELETE")])
@@ -51,11 +53,29 @@ def test_private_routes_denied(path, method):
     "/api/documents/id/original-page/1",
     "/api/sources/id-123",
     "/api/sources/id-123/highlight",
-    "/api/ask/active",
-    "/api/ask/status/req-123",
 ])
 def test_reader_routes(path):
     assert request(path) == 200
+
+
+def test_reader_pages_hide_admin_controls(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from navigator.main import create_app
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    app = create_app(synthetic_fallback=True)
+    with TestClient(app) as admin:
+        html = admin.get("/documents").text
+        assert 'href="/review"' in html and 'id="import-form"' in html
+        reader = TestClient(ReaderGateway(app, "https://aitropos.ru"))
+        response = reader.get("/documents", headers={"altropos.reader": "False"})
+        assert response.status_code == 200
+        assert 'id="documents-list"' in response.text
+        for element in ('href="/review"', 'id="import-form"', 'document-card__review'):
+            assert element not in response.text
+        blocked = reader.get("/review")
+        assert blocked.status_code == 403
+        assert blocked.json()["error"]["code"] == "admin_required"
 
 
 def test_csrf_and_body_bound():
@@ -254,7 +274,7 @@ def test_public_tabs_and_ask_work_through_reader_gateway_without_auth(tmp_path, 
         docs_res = client.get("/api/documents")
         assert docs_res.status_code == 200 and docs_res.json()["documents"] == []
         active_res = client.get("/api/ask/active")
-        assert active_res.status_code == 200 and active_res.json() == {"active": None}
+        assert active_res.status_code == 403
         ask_res = client.post(
             "/api/ask",
             json={"question": "Как зовут Ливанова, кто это?"},

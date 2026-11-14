@@ -66,6 +66,16 @@ def test_pages_health_and_security_headers(client: TestClient) -> None:
         assert client.get(path).status_code == 200
 
 
+def test_demo_document_card_presentation_url_opens_existing_source(client: TestClient) -> None:
+    documents = client.get("/api/documents").json()["documents"]
+    assert documents
+    for document in documents:
+        source = client.get(document["presentation_url"])
+        assert source.status_code == 200
+        assert "ДЕМО-ПРЕДСТАВЛЕНИЕ" in source.text
+        assert document["title"] in source.text
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
