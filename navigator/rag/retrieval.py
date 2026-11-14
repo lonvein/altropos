@@ -66,6 +66,20 @@ def _ordered(scores):
     return sorted(scores, key=lambda key: (-scores[key], key))
 
 
+def _load_compatible_vectors(store, snapshots, vector_pub_ids, by_id):
+    """Validate compatible vector shards and reconstruct only as_of-visible vectors."""
+    vector_fragments, matrices = [], []
+    for manifest, shard, _ in snapshots:
+        if manifest.publication_id not in vector_pub_ids:
+            continue
+        shard_index = load_vectors(store, manifest, shard)
+        for i, frag in enumerate(shard):
+            if frag.id in by_id:
+                vector_fragments.append(frag)
+                matrices.append(shard_index.reconstruct(i))
+    return vector_fragments, matrices
+
+
 def _snapshot(store, warnings=None, *, vectors=False):
     # active_publications rejects hybrid fingerprints before a caller can elect BM25.
     # This equivalent ready join also pins metadata in the SAME SQL statement, so a
@@ -186,57 +200,73 @@ class Searcher:
         queries = list(dict.fromkeys([request.question] + (subqueries.queries if subqueries else [])))
         lexical, rankings = _bm25(fragments, queries)
         scores, score_kind = lexical, "bm25"
-        hybrid = (self.settings.ml_enabled and self.embeddings is not None and self.reranker is not None
-                  and all(m.mode == "hybrid" and m.embedding_fingerprint == self.settings.fingerprint
-                          for m, _, _ in snapshots))
-        if not hybrid:
-            warnings.append(BM25_WARNING)
-            if any(m.mode == "hybrid" and m.embedding_fingerprint != self.settings.fingerprint
-                   for m, _, _ in snapshots):
-                warnings.append("Ревизия embeddings несовместима; векторы не используются.")
-        elif fragments:
+        ml_ready = (self.settings.ml_enabled and self.embeddings is not None
+                    and self.reranker is not None)
+        vector_pub_ids = {
+            m.publication_id for m, _, _ in snapshots
+            if m.mode == "hybrid" and m.embedding_fingerprint == self.settings.fingerprint
+        }
+        has_incompatible = any(
+            m.mode == "hybrid" and m.embedding_fingerprint != self.settings.fingerprint
+            for m, _, _ in snapshots
+        )
+        hybrid = ml_ready and (
+            (not fragments and (not snapshots or bool(vector_pub_ids)))
+            or bool(fragments and vector_pub_ids)
+        )
+        ml_failure_warning = None
+        if hybrid and fragments:
             try:
-                import faiss
-                import numpy as np
-
-                # Validate every shard before combining only as_of-visible vectors.
-                matrices = []
-                for manifest, shard, _ in snapshots:
-                    index = load_vectors(self.store, manifest, shard)
-                    matrices.extend(index.reconstruct(i) for i, f in enumerate(shard) if f.id in by_id)
-                index = faiss.IndexFlatIP(1024)
-                index.add(np.ascontiguousarray(matrices, dtype="float32"))
-                query_vectors = await embed(self.embeddings, queries, "query", self.settings)
-                _, positions = index.search(query_vectors, min(30, len(fragments)))
-                rankings += [[fragments[int(i)].id for i in row if i >= 0] for row in positions]
-                scores, score_kind = rrf(rankings), "rrf"
-                candidates = [by_id[key] for key in _ordered(scores)[:40]]
-                response = RerankResponse.model_validate(await asyncio.wait_for(self.reranker.rerank(
-                    RerankRequest(question=request.question, fragments=candidates)), self.settings.request_timeout))
-                ids = [s.fragment_id for s in response.scores]
-                if (response.model != self.settings.reranker_model or
-                        response.revision != self.settings.reranker_revision or
-                        len(ids) != len(set(ids)) or set(ids) != {f.id for f in candidates}):
-                    raise component_error("invalid_model_output", "Некорректные ID или ревизия reranker.")
-                scores = {s.fragment_id: s.score for s in response.scores}
-                score_kind = "reranker"
-                if self.settings.threshold_calibrated:
-                    scores = {key: value for key, value in scores.items()
-                              if value >= self.settings.rerank_threshold}
+                vector_fragments, matrices = _load_compatible_vectors(self.store, snapshots, vector_pub_ids, by_id)
+                if not vector_fragments:
+                    hybrid = False
                 else:
-                    # Logits have no calibrated relevance boundary. In particular,
-                    # a negative top score must not discard a semantic match.
-                    # Admission of claims belongs to evidence/semantic validation.
-                    warnings.append("Порог reranker не откалиброван; качество выдачи не подтверждено.")
+                    import faiss
+                    import numpy as np
+
+                    index = faiss.IndexFlatIP(1024)
+                    index.add(np.ascontiguousarray(matrices, dtype="float32"))
+                    query_vectors = await embed(self.embeddings, queries, "query", self.settings)
+                    _, positions = index.search(query_vectors, min(30, len(vector_fragments)))
+                    rankings += [[vector_fragments[int(i)].id for i in row if i >= 0] for row in positions]
+                    scores, score_kind = rrf(rankings), "rrf"
+                    candidates = [by_id[key] for key in _ordered(scores)[:40]]
+                    if not candidates:
+                        scores, score_kind = {}, "reranker"
+                    else:
+                        response = RerankResponse.model_validate(await asyncio.wait_for(self.reranker.rerank(
+                            RerankRequest(question=request.question, fragments=candidates)), self.settings.request_timeout))
+                        ids = [s.fragment_id for s in response.scores]
+                        if (response.model != self.settings.reranker_model or
+                                response.revision != self.settings.reranker_revision or
+                                len(ids) != len(set(ids)) or set(ids) != {f.id for f in candidates}):
+                            raise component_error("invalid_model_output", "Некорректные ID или ревизия reranker.")
+                        scores = {s.fragment_id: s.score for s in response.scores}
+                        score_kind = "reranker"
+                        if self.settings.threshold_calibrated:
+                            scores = {key: value for key, value in scores.items()
+                                      if value >= self.settings.rerank_threshold}
+                        else:
+                            # Logits have no calibrated relevance boundary. In particular,
+                            # a negative top score must not discard a semantic match.
+                            # Admission of claims belongs to evidence/semantic validation.
+                            warnings.append("Порог reranker не откалиброван; качество выдачи не подтверждено.")
             except (ComponentError, TimeoutError, ImportError, ValidationError) as exc:
                 log.warning("Hybrid search fell back to BM25 (%s)", type(exc).__name__)
                 hybrid = False
                 scores, score_kind = lexical, "bm25"
-                warnings.append(BM25_WARNING)
                 if isinstance(exc, ComponentError):
-                    warnings.append(f"ML: {exc.detail.code}. Векторная выдача отброшена.")
+                    ml_failure_warning = f"ML: {exc.detail.code}. Векторная выдача отброшена."
                 else:
-                    warnings.append("ML недоступен или вернул некорректный ответ; векторная выдача отброшена.")
+                    ml_failure_warning = "ML недоступен или вернул некорректный ответ; векторная выдача отброшена."
+        if not hybrid:
+            warnings.append(BM25_WARNING)
+            if ml_failure_warning:
+                warnings.append(ml_failure_warning)
+            elif has_incompatible:
+                warnings.append("Ревизия embeddings несовместима; векторы не используются.")
+        elif has_incompatible:
+            warnings.append("Для части документов ревизия embeddings несовместима; для них используется только BM25.")
         limit = min(request.limit, self.settings.top_fragments)
         selected_ids = _ordered(scores)[:limit]
         selected_documents = {by_id[key].document_id for key in selected_ids}

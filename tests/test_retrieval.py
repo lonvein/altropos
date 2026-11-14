@@ -416,3 +416,133 @@ def test_uncalibrated_small_positive_logits_are_not_arbitrarily_thresholded(tmp_
     res = search(store, config, question="Как зовут Ливанова, кто это?", embeddings=emb, reranker=WeakOutlierReranker(config))
     assert len(res.hits) == 4
     assert res.hits[0].score == 0.02
+
+
+def test_mixed_bm25_and_hybrid_corpus_keeps_vector_search_active(tmp_path):
+    class TextAwareReranker(Reranker):
+        async def rerank(self, request):
+            self.calls.append(request)
+            scores = []
+            for f in request.fragments:
+                if "заявка" in f.text or "пропуск" in f.text:
+                    scores.append(RerankScore(fragment_id=f.id, score=5.0))
+                else:
+                    scores.append(RerankScore(fragment_id=f.id, score=0.1))
+            return RerankResponse(
+                model=self.config.reranker_model,
+                revision=self.config.reranker_revision,
+                scores=scores,
+            )
+
+    store = Store(tmp_path)
+    bm25_cfg = settings(False, data_dir=tmp_path)
+    hybrid_cfg = settings(True, data_dir=tmp_path)
+    # "a-bm25" sorts before "z-hybrid" in snapshots, exercising ID mapping alignment.
+    doc_bm25, frags_bm25 = document(
+        store,
+        doc_id="a-bm25",
+        texts=[
+            "Общие положения о доступе на территорию кампуса.",
+            "Специальный пропуск оформляется через комендатуру.",
+        ],
+    )
+    doc_hybrid, frags_hybrid = document(
+        store,
+        doc_id="z-hybrid",
+        texts=[
+            "Заявка координатору направляется заранее.",
+            "Архивный раздел без отношения к вопросу.",
+        ],
+    )
+    Indexer(store, bm25_cfg).index_document(doc_bm25.id, frags_bm25)
+    emb = Embeddings(hybrid_cfg)
+    Indexer(store, hybrid_cfg, emb).index_document(doc_hybrid.id, frags_hybrid)
+    emb.calls.clear()
+
+    reranker = TextAwareReranker(hybrid_cfg)
+    semantic_res = search(store, hybrid_cfg, question="синоним", embeddings=emb, reranker=reranker)
+    assert semantic_res.mode == "hybrid"
+    assert indexing.BM25_WARNING not in semantic_res.warnings
+    assert len(emb.calls) == 1
+    assert any(h.fragment.id == "z-hybrid-f0" for h in semantic_res.hits)
+    assert semantic_res.hits[0].fragment.id == "z-hybrid-f0"
+
+    lexical_res = search(store, hybrid_cfg, question="специальный пропуск", embeddings=emb, reranker=reranker)
+    assert lexical_res.mode == "hybrid"
+    assert indexing.BM25_WARNING not in lexical_res.warnings
+    assert any(h.fragment.id == "a-bm25-f1" for h in lexical_res.hits)
+    assert lexical_res.hits[0].fragment.id == "a-bm25-f1"
+
+
+def test_mixed_compatible_and_incompatible_hybrid_shards_keep_compatible_vectors(tmp_path):
+    store = Store(tmp_path)
+    old_cfg = settings(True, data_dir=tmp_path, embedding_revision="legacy-rev-0")
+    new_cfg = settings(True, data_dir=tmp_path)
+
+    doc_old, frags_old = document(store, doc_id="a-old", texts=["Архивная инструкция по пропускам."])
+    doc_new, frags_new = document(store, doc_id="b-new", texts=["Заявка координатору принимается онлайн."])
+
+    Indexer(store, old_cfg, Embeddings(old_cfg)).index_document(doc_old.id, frags_old)
+    emb = Embeddings(new_cfg)
+    Indexer(store, new_cfg, emb).index_document(doc_new.id, frags_new)
+    emb.calls.clear()
+
+    res = search(store, new_cfg, question="синоним", embeddings=emb, reranker=Reranker(new_cfg))
+    assert res.mode == "hybrid"
+    assert indexing.BM25_WARNING not in res.warnings
+    assert any("несовместима" in w for w in res.warnings)
+    assert len(emb.calls) == 1
+    assert any(h.fragment.id == "b-new-f0" for h in res.hits)
+
+
+def test_mixed_corpus_falls_back_to_bm25_when_only_bm25_docs_are_visible_by_as_of(tmp_path):
+    store = Store(tmp_path)
+    bm25_cfg = settings(False, data_dir=tmp_path)
+    hybrid_cfg = settings(True, data_dir=tmp_path)
+
+    doc_bm25, frags_bm25 = document(
+        store,
+        doc_id="a-bm25",
+        texts=["Специальный пропуск действует с 2026 года."],
+        metadata={"reviewed": True, "valid_from": "2026-01-01"},
+    )
+    doc_hybrid, frags_hybrid = document(
+        store,
+        doc_id="z-hybrid",
+        texts=["Заявка 2025 года утратила силу."],
+        metadata={"reviewed": True, "valid_from": "2025-01-01", "valid_to": "2025-12-31"},
+    )
+
+    Indexer(store, bm25_cfg).index_document(doc_bm25.id, frags_bm25)
+    emb = Embeddings(hybrid_cfg)
+    Indexer(store, hybrid_cfg, emb).index_document(doc_hybrid.id, frags_hybrid)
+    emb.calls.clear()
+
+    res = asyncio.run(
+        Searcher(store, hybrid_cfg, emb, Reranker(hybrid_cfg)).search(
+            SearchRequest(question="пропуск", as_of="2026-06-01")
+        )
+    )
+    assert res.mode == "bm25"
+    assert indexing.BM25_WARNING in res.warnings
+    assert emb.calls == []
+    assert [h.fragment.id for h in res.hits] == ["a-bm25-f0"]
+
+
+def test_resolve_indexer_attaches_embeddings_only_when_ml_enabled(tmp_path):
+    from navigator.documents.service import DocumentService
+
+    ml_off_service = DocumentService(Store(tmp_path / "off"), settings(False, data_dir=tmp_path / "off"))
+    assert ml_off_service.indexer.embeddings is None
+
+    ml_on_service = DocumentService(Store(tmp_path / "on"), settings(True, data_dir=tmp_path / "on"))
+    assert ml_on_service.indexer.embeddings is not None
+
+
+def test_navigator_text_imports_and_lemmatizes_with_pymorphy3():
+    import navigator.text as nav_text
+
+    toks = nav_text.tokens("Заявки   поселения")
+    assert "заявка" in toks
+    assert "поселение" in toks
+    assert nav_text.normalize_quote("  проверка \n текста  ") == "проверка текста"

@@ -45,8 +45,11 @@ def _resolve_indexer(store: Store, settings: Settings, indexer: Indexer | None =
     if indexer is not None:
         return indexer
     # Never hide import/configuration failures behind an incompatible fake shard.
+    from navigator.rag.clients import EmbeddingsClient
     from navigator.rag.indexing import Indexer as RAGIndexer
-    return RAGIndexer(store=store, settings=settings)
+
+    embeddings = EmbeddingsClient(settings) if settings.ml_enabled else None
+    return RAGIndexer(store=store, settings=settings, embeddings=embeddings)
 
 
 class DocumentService:
