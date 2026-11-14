@@ -85,6 +85,37 @@ def validate_lexical(store: Store, manifest: IndexManifest, fragments: list[Frag
         raise ValueError("Incompatible BM25 format or fragment mapping")
 
 
+def validate_binding(document: Document, manifest: IndexManifest, fragments: list[Fragment]):
+    """A ready flag does not make a pending extraction a published version."""
+    if ((manifest.document_id, manifest.document_version) != (document.id, document.version)
+            or not fragments or len({f.id for f in fragments}) != len(fragments)
+            or [f.ordinal for f in fragments] != list(range(len(fragments)))
+            or any((f.document_id, f.document_version, f.locator.kind) !=
+                   (document.id, document.version, document.media_type) for f in fragments)
+            or fragments_digest(fragments) != manifest.fragments_sha256):
+        raise ValueError("Publication does not match the document version")
+
+
+def inspect_index(store: Store, document_id: str, *, vectors=True):
+    rows = store.rows("""SELECT d.payload,p.id AS publication_id,p.manifest,p.fragments FROM documents d
+        JOIN publications p ON p.id=d.active_publication WHERE d.id=? AND d.status='ready'""", (document_id,))
+    if not rows:
+        raise component_error("not_ready", "Документ ещё не опубликован для поиска.")
+    row = rows[0]
+    document = Document.model_validate_json(row['payload'])
+    manifest = IndexManifest.model_validate_json(row['manifest'])
+    if document.id != document_id or manifest.publication_id != row['publication_id']:
+        raise ValueError('Publication identity mismatch')
+    fragments = [Fragment.model_validate(f) for f in json.loads(row['fragments'])]
+    validate_binding(document, manifest, fragments)
+    validate_lexical(store, manifest, fragments)
+    if vectors and manifest.mode == 'hybrid':
+        load_vectors(store, manifest, fragments)
+    return {'document_id': document_id, 'publication_id': manifest.publication_id,
+            'version': manifest.document_version, 'mode': manifest.mode,
+            'fragment_count': len(fragments), 'verified': True}
+
+
 def load_vectors(store: Store, manifest: IndexManifest, fragments: list[Fragment]):
     import faiss
     import numpy as np
@@ -124,13 +155,34 @@ class Indexer:
 
     def index_document(self, document_id: str, fragments: list[Fragment]) -> IndexResult:
         try:
-            return self._index(document_id, fragments)
+            result = self._index(document_id, fragments)
+            inspect_index(self.store, document_id, vectors=result.mode == 'hybrid')
+            return result
         except ComponentError:
             raise
         except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
             raise component_error("index_publish_failed", "Не удалось опубликовать индекс документа.") from exc
 
-    def _index(self, document_id, fragments):
+    def reindex_document(self, document_id: str) -> IndexResult:
+        """Rebuild only immutable published text; never parse or approve a draft."""
+        rows = self.store.rows("""SELECT d.payload,p.id AS publication_id,p.manifest,p.fragments FROM documents d
+            JOIN publications p ON p.id=d.active_publication WHERE d.id=? AND d.status='ready'""", (document_id,))
+        if not rows:
+            raise component_error('not_ready', 'Переиндексация доступна только опубликованному документу.')
+        row = rows[0]
+        document = Document.model_validate_json(row['payload'])
+        manifest = IndexManifest.model_validate_json(row['manifest'])
+        if document.id != document_id or manifest.publication_id != row['publication_id']:
+            raise ValueError('Publication identity mismatch')
+        fragments = [Fragment.model_validate(f) for f in json.loads(row['fragments'])]
+        validate_binding(document, manifest, fragments)
+        if hashlib.sha256(self.store._safe_path(document.original_path).read_bytes()).hexdigest() != document.sha256:
+            raise ValueError('Original source checksum mismatch')
+        result = self._index(document_id, fragments, force=True, preserve_hybrid=manifest.mode == 'hybrid')
+        inspect_index(self.store, document_id)
+        return result
+
+    def _index(self, document_id, fragments, *, force=False, preserve_hybrid=False):
         row = self.store.document(document_id)
         if not row or not row["payload"]:
             raise component_error("not_found", "Документ не зарегистрирован.")
@@ -155,7 +207,7 @@ class Indexer:
             if manifest.document_version == document.version:
                 if manifest.fragments_sha256 != digest:
                     raise component_error("invalid_request", "Изменение фрагментов требует новой версии документа.")
-                if row["status"] == "ready" and ((hybrid and manifest.mode == "hybrid" and
+                if not force and row["status"] == "ready" and ((hybrid and manifest.mode == "hybrid" and
                         manifest.embedding_fingerprint == self.settings.fingerprint) or
                         (not hybrid and manifest.mode == "bm25")):
                     validate_lexical(self.store, manifest, fragments)
@@ -186,9 +238,12 @@ class Indexer:
                     raise
                 warnings.append(exc.detail.message)
         mode = "hybrid" if vector_data is not None else "bm25"
+        if preserve_hybrid and mode != 'hybrid':
+            raise component_error('model_unavailable',
+                                  'Гибридный индекс не перестроен: embeddings недоступны; прежняя публикация сохранена.')
         if mode == "bm25":
             warnings.append(BM25_WARNING)
-            if (row["status"] == "ready" and old is not None and manifest is not None
+            if (not force and row["status"] == "ready" and old is not None and manifest is not None
                     and manifest.document_version == document.version and manifest.mode == "bm25"):
                 validate_lexical(self.store, manifest, fragments)
                 return IndexResult.model_validate_json(old["result"])

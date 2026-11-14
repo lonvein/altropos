@@ -299,7 +299,11 @@ def test_rag_kfo_definition_complete_without_spurious_warnings(tmp_path):
         llm_enabled=True,
         llm_revision="test-v1",
         reranker_revision="rerank-v1",
-        threshold_calibrated=False,
+        # This fixture assigns known artificial relevance labels (0.95/0.02).
+        # Its no-warning assertions require an explicitly calibrated fixture;
+        # production uncalibrated logits must not use an implicit cutoff.
+        threshold_calibrated=True,
+        rerank_threshold=0.05,
         context_budget=2200,
         top_fragments=4,
     )

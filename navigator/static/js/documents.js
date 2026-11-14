@@ -363,6 +363,29 @@
       }
 
       const isBusy = status === "queued" || status === "processing";
+      const reindexButton = root.querySelector('.document-card__reindex');
+      if (reindexButton && doc.index_url && status === 'ready') {
+        A.show(reindexButton, true);
+        reindexButton.addEventListener('click', async () => {
+          reindexButton.disabled = true;
+          try {
+            const index = await A.apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/index`, { method: 'GET' });
+            if (index.verified) {
+              showDocumentsStatus(`Индекс проверен: ${index.fragment_count} фрагментов. Документ доступен для поиска.`);
+              return;
+            }
+            const job = await A.apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/reindex`, { method: 'POST' });
+            showDocumentsStatus('Восстанавливаю индекс опубликованного текста без повторного OCR…');
+            const completed = await pollJob(job.job_id, () => {});
+            if (completed.status !== 'ready') throw new Error(completed.error || 'Восстановление индекса не завершено.');
+            showDocumentsStatus(`Индекс восстановлен: ${completed.result.fragment_count} фрагментов.`);
+          } catch (error) {
+            showDocumentsStatus(A.friendlyError(error), true);
+          } finally {
+            reindexButton.disabled = false;
+          }
+        });
+      }
       if (reviewButton && typeof doc.id === "string" && doc.id) {
         reviewButton.disabled = isBusy;
         A.setText(reviewButton, status === "ready" ? "Повторить проверку" : "Проверить распознавание");

@@ -84,6 +84,23 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
     def documents(request: Request):
         return {"documents": [public_document(d) for d in current(request).list_documents()]}
 
+    @api.get('/documents/{document_id}/index')
+    def index_status(request: Request, document_id: str):
+        svc = current(request)
+        if svc.get_document(document_id) is None:
+            return _error('not_found', 'Документ не найден.', 404)
+        return svc.index_status(document_id)
+
+    @api.post('/documents/{document_id}/reindex')
+    def reindex(request: Request, document_id: str):
+        svc = current(request)
+        if svc.get_document(document_id) is None:
+            return _error('not_found', 'Документ не найден.', 404)
+        try:
+            return svc.reindex_document(document_id)
+        except ValueError as exc:
+            return _error('not_ready', str(exc), 409)
+
     @api.post("/documents/{document_id}/retry")
     def retry(request: Request, document_id: str):
         svc = current(request)

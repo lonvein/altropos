@@ -155,9 +155,12 @@ class AnswerPipeline:
         if not result.publication_ids:
             return [], [], bool(result.hits)
         placeholders = ",".join("?" for _ in result.publication_ids)
+        document_ids = sorted({hit.fragment.document_id for hit in result.hits})
+        doc_placeholders = ",".join("?" for _ in document_ids)
         rows = self.store.rows(f"""SELECT p.id,p.manifest,p.fragments,d.payload,
             d.title,d.metadata FROM publications p JOIN documents d ON d.id=p.document_id
-            WHERE p.id IN ({placeholders}) AND d.status='ready'""", result.publication_ids)
+            WHERE p.id IN ({placeholders}) AND d.id IN ({doc_placeholders})
+            AND d.status='ready'""", [*result.publication_ids, *document_ids])
         trusted = {}
         for row in rows:
             manifest = IndexManifest.model_validate_json(row["manifest"])

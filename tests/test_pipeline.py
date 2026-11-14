@@ -253,6 +253,22 @@ def test_pinned_publication_survives_active_pointer_change(setup):
     assert ask(setup, model).status == "answered"
 
 
+def test_unrelated_invalid_document_payload_does_not_break_selected_sources(setup):
+    store = setup[0]
+    # A stale ready record from an interrupted re-OCR is not a source of this answer.
+    other = Document(id='artificial-other', version='v1', name='other.pdf',
+        title='ARTIFICIAL OTHER', sha256='2'*64, original_path='originals/other.pdf', media_type='pdf')
+    store.register_document(other)
+    original = store.rows('SELECT * FROM publications')[0]
+    manifest = json.loads(original['manifest']);manifest.update(publication_id='other-publication',document_id=other.id)
+    store.execute('INSERT INTO publications(id,document_id,manifest,fragments,result) VALUES(?,?,?,?,?)',
+        ('other-publication',other.id,json.dumps(manifest),original['fragments'],original['result']))
+    store.execute("UPDATE documents SET status='ready',active_publication='other-publication',payload='{}' WHERE id=?",(other.id,))
+    setup[2].result.publication_ids.append('other-publication')
+    model = Model([setup[4]], [Verification(supported=True, complete=True)])
+    assert ask(setup, model).status == 'answered'
+
+
 def test_no_new_fragments_read_after_search(setup):
     setup[0].execute("UPDATE fragments SET text=?", (ADVICE,))
     response = ask(setup)
