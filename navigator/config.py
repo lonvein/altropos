@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     demo_login_enabled: bool = True
     demo_username: str = "admin"
     demo_password: str = "qwerty"
+    demo_operator_access: bool = False
     # Separate secret administrator account (PBKDF2 hash from scripts/deploy/make_admin_hash.py).
     admin_username: str = ""
     admin_password_hash: str = ""
