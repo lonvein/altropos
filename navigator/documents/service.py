@@ -32,6 +32,8 @@ from navigator.ingestion.model import Parsed
 from navigator.interfaces import Indexer
 from navigator.schemas import Document, Fragment, MetadataPatch, Relation
 
+IMPORT_DATE_WARNING = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
+
 logger = logging.getLogger(__name__)
 
 
@@ -243,7 +245,7 @@ class DocumentService:
         source_url = previous_doc.source_url if previous_doc else registered.get("url")
         retrieved_at = previous_doc.retrieved_at if previous_doc else None
         if source_url and not (meta.issued or meta.valid_from):
-            dated_warning = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
+            dated_warning = IMPORT_DATE_WARNING
             if dated_warning not in warnings:
                 warnings.append(dated_warning)
         doc = Document(
@@ -997,9 +999,12 @@ class DocumentService:
             if row["status"] == "processing":
                 raise ValueError("Дождитесь окончания обработки")
             doc = Document.model_validate_json(row["payload"])
-            updated_meta = MetadataPatch.model_validate({
+            metadata_values = {
                 **doc.metadata.model_dump(), **patch.model_dump(exclude_unset=True),
-            })
+            }
+            if patch.reviewed is True and not metadata_values.get("valid_from"):
+                metadata_values["valid_from"] = date.today()
+            updated_meta = MetadataPatch.model_validate(metadata_values)
             if updated_meta.relations:
                 updated_meta = updated_meta.model_copy(
                     update={"relations": self._resolve_relations(updated_meta.relations, con=con)}
@@ -1055,6 +1060,8 @@ class DocumentService:
         warnings = filter_user_warnings(raw_warnings, status=status, needs_review=(status == "needs_review"))
         if isinstance(meta, dict):
             meta = dict(meta)
+            if meta.get("reviewed") is True:
+                warnings = [warning for warning in warnings if warning != IMPORT_DATE_WARNING]
         fragment_id = None
         if row["status"] == "ready":
             fragments = self.store.rows("SELECT id FROM fragments WHERE document_id=? ORDER BY ordinal LIMIT 1", (row["id"],))

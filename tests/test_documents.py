@@ -10,6 +10,36 @@ from navigator.ingestion.common import ParseError
 from navigator.schemas import MetadataPatch, Relation
 
 
+@pytest.mark.parametrize("explicit_date", [None, date(2024, 2, 3)])
+def test_confirm_imported_metadata_defaults_date_and_clears_stale_notice(store_and_service, explicit_date):
+    _, service, _ = store_and_service
+    from navigator.documents.service import IMPORT_DATE_WARNING
+    result = service.upload_file('artificial.html',
+        b'<html><body><p>ARTIFICIAL regulation body without dates.</p></body></html>',
+        source_url='https://mipt.ru/artificial.html')
+    assert service.process_next_job()
+    doc_id = result['document_id']
+    assert IMPORT_DATE_WARNING in service.get_document(doc_id)['warnings']
+    updated = service.patch_metadata(doc_id, MetadataPatch(reviewed=True, valid_from=explicit_date))
+    assert updated['metadata']['valid_from'] == (explicit_date or date.today()).isoformat()
+    assert updated['metadata']['issued'] is None  # Do not invent the date of issue.
+    assert updated['metadata']['reviewed'] is True
+    assert IMPORT_DATE_WARNING not in updated['warnings']
+    assert service.get_document(doc_id)['metadata'] == updated['metadata']
+
+
+def test_unconfirmed_import_keeps_notice_and_has_no_default_date(store_and_service):
+    _, service, _ = store_and_service
+    from navigator.documents.service import IMPORT_DATE_WARNING
+    result = service.upload_file('artificial.html',
+        b'<html><body><p>ARTIFICIAL regulation body without dates.</p></body></html>',
+        source_url='https://mipt.ru/artificial.html')
+    assert service.process_next_job()
+    updated = service.patch_metadata(result['document_id'], MetadataPatch(reviewed=False))
+    assert updated['metadata']['valid_from'] is None
+    assert IMPORT_DATE_WARNING in updated['warnings']
+
+
 @pytest.fixture
 def store_and_service(tmp_path):
     root = tmp_path / "runtime"
