@@ -59,10 +59,10 @@ def draft_wire_schema(max_output_tokens, fragments):
         if choice.get("type") == "string":
             choice["maxLength"] = 200
     claim = schema["$defs"]["Claim"]["properties"]
-    claim["text"]["maxLength"] = 240
+    claim["text"]["maxLength"] = 360
     claim["evidence"]["maxItems"] = 1
     evidence = schema["$defs"]["Evidence"]["properties"]
-    evidence["quote"]["maxLength"] = 180
+    evidence["quote"]["maxLength"] = 320
     evidence["fragment_id"]["enum"] = [f.id for f in fragments]
     return schema
 
@@ -70,6 +70,20 @@ def draft_wire_schema(max_output_tokens, fragments):
 def quote_choices(text, limit=180):
     """Exact bounded source spans; preserve every character inside each span."""
     choices = []
+    # Numbered provisions and paragraphs are useful complete citations. Splitting
+    # only at punctuation would detach telephone numbers after "тел." or the
+    # provision number from its conditions. Longer spans still use bounded windows.
+    provisions = [p for p in re.split(r'(?<!\S)(?=\d+(?:\.\d+)+\.\s)', text) if p.strip()]
+    if len(provisions) > 1:
+        # Offer a short numbered provision as one unit, rather than offering
+        # an easier but incomplete sentence from that same provision as well.
+        return list(dict.fromkeys(span for provision in provisions if provision.strip()
+                    for span in ([provision.strip()] if 3 <= len(provision.strip()) <= limit
+                                 else quote_choices(provision, limit))))
+    for clause in re.split(r'\n+', text):
+        clause = clause.strip()
+        if 3 <= len(clause) <= limit:
+            choices.append(clause)
     for paragraph in re.split(r"\n+|(?<=[.!?;])\s+", text):
         paragraph = paragraph.strip()
         if len(paragraph) < 3:
@@ -101,7 +115,7 @@ def constrain_evidence(schema, fragments):
     constrained = deepcopy(schema)
     alternatives = []
     for fragment in fragments:
-        choices = quote_choices(fragment.text)
+        choices = quote_choices(fragment.text, limit=320)
         if choices:
             alternatives.append({"type": "object", "additionalProperties": False,
                 "required": ["fragment_id", "quote"], "properties": {
@@ -275,6 +289,13 @@ class LLMClient:
             raise invalid("LLM вернула неверный результат токенизации.")
         return len(data["tokens"])
 
+    async def count_tokens(self, text: str) -> int:
+        """Exact prompt-payload size from the loaded model's own tokenizer."""
+        if not self.settings.llm_enabled:
+            raise failure("model_unavailable", "Локальная LLM отключена.")
+        async with self.sequence():
+            return await self._tokens(text)
+
     @staticmethod
     def _evidence(draft, fragments):
         texts = {fragment.id: fragment.text for fragment in fragments}
@@ -344,6 +365,12 @@ class LLMClient:
         result = await self._call(request, Draft,
                                   "Ответь на вопрос по предоставленным фрагментам с учётом as_of. "
                                   "Каждое утверждение и шаг снабди ID и дословной цитатой. "
+                                  "Если исходный текст явно содержит номер пункта, укажи его рядом с выводом; "
+                                  "не подменяй его номером соседнего пункта в том же фрагменте. "
+                                  "Отвечай только про ситуацию вопроса: соседние процедуры не добавляй. "
+                                  "Если вопрос не требует последовательности действий, дай прямой ответ в summary без steps. "
+                                  "Сохраняй относящиеся к ответу сроки, телефоны и адреса из источника. "
+                                  "Общие слова об ответственности не превращай в обязанность оплатить или иной конкретный шаг. "
                                   "Учитывай условия, исключения, неполноту и конфликты; не придумывай источники.")
         try:
             self._evidence(result, request.fragments)

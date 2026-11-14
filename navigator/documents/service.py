@@ -32,6 +32,8 @@ from navigator.ingestion.model import Parsed
 from navigator.interfaces import Indexer
 from navigator.schemas import Document, Fragment, MetadataPatch, Relation
 
+IMPORT_DATE_WARNING = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
+
 logger = logging.getLogger(__name__)
 
 
@@ -243,7 +245,7 @@ class DocumentService:
         source_url = previous_doc.source_url if previous_doc else registered.get("url")
         retrieved_at = previous_doc.retrieved_at if previous_doc else None
         if source_url and not (meta.issued or meta.valid_from):
-            dated_warning = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
+            dated_warning = IMPORT_DATE_WARNING
             if dated_warning not in warnings:
                 warnings.append(dated_warning)
         doc = Document(
@@ -282,12 +284,15 @@ class DocumentService:
         from navigator.documents.snapshots import save_snapshot
         save_snapshot(self.store, doc, fragments, parsed.blocks)
         index_res = self.indexer.index_document(doc_id, fragments)
+        if not self.index_status(doc_id)['verified']:
+            raise ValueError('Post-import index verification failed')
         self.store.execute("UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?", (doc_id,))
         return (
             "ready",
             {
                 "document_id": doc_id,
                 "publication_id": index_res.publication_id,
+                "index_verified": True,
                 "mode": index_res.mode,
                 "fragment_count": index_res.fragment_count,
                 "warnings": index_res.warnings,
@@ -408,6 +413,15 @@ class DocumentService:
             self._run_import_url_job(job_id, payload)
             return True
 
+        if kind == 'reindex':
+            try:
+                result = self.indexer.reindex_document(payload['document_id'])
+                self.queue.complete_job(job_id, status='ready', result={**result.model_dump(mode='json'), 'index_verified': True})
+            except Exception:
+                logger.exception('Reindex failed for %s', payload['document_id'])
+                self.queue.complete_job(job_id, status='failed', error='Индекс не восстановлен; проверьте доступность моделей, артефакты и согласованность опубликованной версии. Непроверенная версия требует проверки.')
+            return True
+
         doc_id = payload["document_id"]
         try:
             final_status, result = self._process_file_payload(payload)
@@ -432,6 +446,24 @@ class DocumentService:
         while processed < max_jobs and self.process_next_job():
             processed += 1
         return processed
+
+    def index_status(self, doc_id: str) -> dict:
+        from navigator.rag.indexing import inspect_index
+        from navigator.interfaces import ComponentError
+        try:
+            return {'status': 'ready', **inspect_index(self.store, doc_id)}
+        except (ValueError, OSError, RuntimeError, ImportError, ComponentError):
+            return {'document_id': doc_id, 'status': 'invalid', 'verified': False,
+                    'message': 'Нет согласованной ready-публикации: проверьте версию или переиндексируйте опубликованный текст.'}
+
+    def reindex_document(self, doc_id: str) -> dict:
+        # No upload, new document IDs or mutable extraction cache are involved.
+        row = self.store.document(doc_id)
+        if not row or row['status'] != 'ready' or not row.get('active_publication'):
+            raise ValueError('Переиндексация требует опубликованной версии документа.')
+        existing = self.store.rows("SELECT id FROM jobs WHERE kind='reindex' AND status IN ('queued','processing') AND json_extract(payload,'$.document_id')=?", (doc_id,))
+        job_id = existing[0]['id'] if existing else self.queue.enqueue('reindex', {'document_id': doc_id})
+        return {'document_id': doc_id, 'job_id': job_id, 'status': 'queued'}
 
     @staticmethod
     def _next_version(current_version: str | None) -> str:
@@ -997,9 +1029,12 @@ class DocumentService:
             if row["status"] == "processing":
                 raise ValueError("Дождитесь окончания обработки")
             doc = Document.model_validate_json(row["payload"])
-            updated_meta = MetadataPatch.model_validate({
+            metadata_values = {
                 **doc.metadata.model_dump(), **patch.model_dump(exclude_unset=True),
-            })
+            }
+            if patch.reviewed is True and not metadata_values.get("valid_from"):
+                metadata_values["valid_from"] = date.today()
+            updated_meta = MetadataPatch.model_validate(metadata_values)
             if updated_meta.relations:
                 updated_meta = updated_meta.model_copy(
                     update={"relations": self._resolve_relations(updated_meta.relations, con=con)}
@@ -1055,6 +1090,8 @@ class DocumentService:
         warnings = filter_user_warnings(raw_warnings, status=status, needs_review=(status == "needs_review"))
         if isinstance(meta, dict):
             meta = dict(meta)
+            if meta.get("reviewed") is True:
+                warnings = [warning for warning in warnings if warning != IMPORT_DATE_WARNING]
         fragment_id = None
         if row["status"] == "ready":
             fragments = self.store.rows("SELECT id FROM fragments WHERE document_id=? ORDER BY ordinal LIMIT 1", (row["id"],))
@@ -1062,6 +1099,7 @@ class DocumentService:
         return {
             "fragment_id": fragment_id,
             "presentation_url": f"/api/documents/{row['id']}/view" if fragment_id else None,
+            "index_url": f"/api/documents/{row['id']}/index",
             "id": row["id"],
             "name": row["name"],
             "title": row["title"],

@@ -44,18 +44,30 @@ def main():
                         time.sleep(0.5)
                     else:
                         raise RuntimeError("Server did not start")
+                    origin = {"Origin": values["PUBLIC_ORIGIN"]}
+                    # Anonymous: login page and a minimal health probe only.
+                    assert client.get("/documents", headers={"Accept": "text/html"}).status_code == 303
+                    assert client.get("/api/documents").status_code == 401
+                    assert client.get("/login").status_code == 200
+                    assert "profile" not in client.get("/health").json()
+                    assert client.post("/api/documents").status_code == 403  # no same-origin proof
+                    assert client.post("/login", data={"username": "admin", "password": "bad"},
+                                       headers=origin).status_code == 401
+                    # The public demo account signs in and has every function except OCR review.
+                    demo = client.post("/login", data={"username": "admin", "password": "qwerty"},
+                                       headers=origin)
+                    assert demo.status_code == 303, demo.text
                     assert client.get("/documents").status_code == 200
                     assert client.get("/api/documents").status_code == 200
                     assert client.get("/api/ask/active").status_code == 200
-                    assert client.get("/review").status_code == 403
-                    health = client.get("/health")
-                    assert health.status_code == 200
-                    assert "profile" not in health.json()
-                    assert "url" not in health.json().get("ml", {})
-                    assert client.post("/api/documents").status_code == 403
+                    assert client.get("/review", headers={"Accept": "text/html"}).status_code == 403
+                    assert client.get("/api/documents/none/review").status_code == 403
+                    assert client.patch("/api/documents/none/metadata", json={"reviewed": True},
+                                        headers=origin).status_code == 403
+                    assert client.post("/api/documents", headers=origin).status_code == 422
                     assert client.post("/api/ask", json={}).status_code == 403
-                    assert client.post("/api/ask", json={}, headers={"Origin": values["PUBLIC_ORIGIN"]}).status_code == 422
-                    print("PASS: real localhost HTTP, open reader tabs, admin boundary, CSRF, schema validation")
+                    assert client.post("/api/ask", json={}, headers=origin).status_code == 422
+                    print("PASS: real localhost HTTP, web login, user/admin boundary, CSRF, schema validation")
             finally:
                 child.terminate()
                 child.wait(timeout=20)

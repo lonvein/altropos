@@ -253,6 +253,22 @@ def test_pinned_publication_survives_active_pointer_change(setup):
     assert ask(setup, model).status == "answered"
 
 
+def test_unrelated_invalid_document_payload_does_not_break_selected_sources(setup):
+    store = setup[0]
+    # A stale ready record from an interrupted re-OCR is not a source of this answer.
+    other = Document(id='artificial-other', version='v1', name='other.pdf',
+        title='ARTIFICIAL OTHER', sha256='2'*64, original_path='originals/other.pdf', media_type='pdf')
+    store.register_document(other)
+    original = store.rows('SELECT * FROM publications')[0]
+    manifest = json.loads(original['manifest']);manifest.update(publication_id='other-publication',document_id=other.id)
+    store.execute('INSERT INTO publications(id,document_id,manifest,fragments,result) VALUES(?,?,?,?,?)',
+        ('other-publication',other.id,json.dumps(manifest),original['fragments'],original['result']))
+    store.execute("UPDATE documents SET status='ready',active_publication='other-publication',payload='{}' WHERE id=?",(other.id,))
+    setup[2].result.publication_ids.append('other-publication')
+    model = Model([setup[4]], [Verification(supported=True, complete=True)])
+    assert ask(setup, model).status == 'answered'
+
+
 def test_no_new_fragments_read_after_search(setup):
     setup[0].execute("UPDATE fragments SET text=?", (ADVICE,))
     response = ask(setup)
@@ -300,7 +316,9 @@ def test_verify_unavailable_does_not_repair(setup):
 def test_context_reduction_prevents_complete_answer(setup):
     # Add a second artificial document with a publication, beyond top_fragments.
     store, settings, search, fragment, draft = setup
-    second = fragment.model_copy(update={"id": "second-fragment", "document_id": "second-doc"})
+    second = fragment.model_copy(update={
+        "id": "second-fragment", "document_id": "second-doc",
+        "text": "Application deadlines and the required attachments are listed in the annex."})
     store.register_document(Document(id="second-doc", version="v1", name="second.pdf",
         title="Second artificial document", sha256="2" * 64,
         original_path="originals/second.pdf", media_type="pdf"))
@@ -312,12 +330,14 @@ def test_context_reduction_prevents_complete_answer(setup):
         bm25={"path": "indexes/second-publication/fixture.json",
               "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()})
     store.publish(manifest, [second], ["Synthetic BM25 fixture"])
-    search.result.hits.append(SearchHit(fragment=second, rank=2, score=0.5, score_kind="bm25"))
+    search.result.hits.append(SearchHit(fragment=second, rank=2, score=0.9, score_kind="bm25"))
     search.result.publication_ids.append(manifest.publication_id)
     settings.top_fragments = 1
     model = Model([draft], [Verification(supported=True, complete=True)])
     response = ask(setup, model)
+    # A comparably relevant, not-yet-covered fragment was left out: a real limit.
     assert response.status == "partial" and not response.verification.complete
+    assert "Контекст сокращён; полнота ответа не подтверждается." in response.warnings
     assert len(model.calls[1][1].fragments) == 1
     assert search.requests[0].limit == 1
     assert len(response.sources) == 2

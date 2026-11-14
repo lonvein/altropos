@@ -1,15 +1,32 @@
 # Integration template: do not replace an existing VPS proxy configuration.
 # Requires SSH local forwarding on VPS 127.0.0.1:18000 -> laptop 127.0.0.1:18000.
-# Public read/search/ask access is open without mandatory login; administrative
-# write routes remain blocked by ReaderGateway and require the private admin port.
+#
+# Authentication is done by the application's own login page and signed session cookies.
+# Remove any `basic_auth` / `basicauth` block that was added at the first deployment: the browser's
+# password prompt must not appear in front of the application, otherwise the web login (and
+# its admin / qwerty prefill) is never reached and API calls fail before they get to the app.
+#
+# Uploads: max_size must cover MAX_UPLOAD_MB plus multipart overhead (40 MB file -> 45MB here).
+# The application and ReaderGateway enforce the exact limits again; Caddy only bounds the edge.
 aitropos.ru {
+	encode zstd gzip
+	header {
+		# Cookies are Secure/HttpOnly (__Host- prefix); keep browsers on HTTPS.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
 	route {
 		request_body {
-			max_size 32KB
+			max_size 45MB
 		}
 		reverse_proxy 127.0.0.1:18000 {
+			# Caddy appends the real client address; the application rate-limits logins by it.
+			header_up X-Forwarded-For {remote_host}
 			transport http {
 				dial_timeout 5s
+				# Uploads of the largest file on a slow link, and one model answer.
+				read_timeout 120s
+				write_timeout 120s
 				response_header_timeout 110s
 			}
 		}

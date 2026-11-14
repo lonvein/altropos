@@ -12,8 +12,8 @@ from navigator.config import Settings
 from navigator.db import Store
 from navigator.interfaces import ComponentError, EmbeddingsClient, RerankerClient
 from navigator.rag.indexing import (BM25_WARNING, component_error, embed, load_vectors,
-                                    tokens, validate_lexical)
-from navigator.schemas import (Fragment, IndexManifest, MetadataPatch, RerankRequest,
+                                    tokens, validate_lexical, validate_binding)
+from navigator.schemas import (Document, Fragment, IndexManifest, MetadataPatch, RerankRequest,
                                RerankResponse, SearchHit, SearchRequest, SearchResult, Subqueries)
 
 log = logging.getLogger(__name__)
@@ -66,25 +66,34 @@ def _ordered(scores):
     return sorted(scores, key=lambda key: (-scores[key], key))
 
 
-def _snapshot(store):
+def _snapshot(store, warnings=None, *, vectors=False):
     # active_publications rejects hybrid fingerprints before a caller can elect BM25.
     # This equivalent ready join also pins metadata in the SAME SQL statement, so a
     # fallback never rereads a newer publication halfway through the request.
-    rows = store.rows("""SELECT p.manifest,p.fragments,d.metadata FROM documents d
+    rows = store.rows("""SELECT p.id AS publication_id,p.manifest,p.fragments,d.metadata,d.payload,d.id FROM documents d
         JOIN publications p ON p.id=d.active_publication
         WHERE d.status='ready' ORDER BY d.id""")
     snapshots = []
     for row in rows:
-        manifest = IndexManifest.model_validate_json(row["manifest"])
-        fragments = sorted((Fragment.model_validate(f) for f in json.loads(row["fragments"])),
-                           key=lambda f: f.ordinal)
-        if (not fragments or len({f.id for f in fragments}) != len(fragments)
-                or [f.ordinal for f in fragments] != list(range(len(fragments)))
-                or any((f.document_id, f.document_version) !=
-                       (manifest.document_id, manifest.document_version) for f in fragments)):
-            raise ValueError("Invalid publication mapping")
-        validate_lexical(store, manifest, fragments)
-        snapshots.append((manifest, fragments, MetadataPatch.model_validate_json(row["metadata"])))
+        try:
+            manifest = IndexManifest.model_validate_json(row["manifest"])
+            if manifest.document_id != row['id'] or manifest.publication_id != row['publication_id']:
+                raise ValueError('Publication identity mismatch')
+            fragments = [Fragment.model_validate(f) for f in json.loads(row["fragments"])]
+            validate_binding(Document.model_validate_json(row['payload']), manifest, fragments)
+            validate_lexical(store, manifest, fragments)
+            if vectors and manifest.mode == 'hybrid':
+                try:
+                    load_vectors(store, manifest, fragments)
+                except ImportError:
+                    pass  # BM25 remains usable without FAISS installed.
+            snapshots.append((manifest, fragments, MetadataPatch.model_validate_json(row["metadata"])))
+        except (ValueError, OSError, RuntimeError, KeyError, TypeError):
+            log.warning('Excluded inconsistent ready publication: %s', row['id'])
+            if warnings is not None:
+                warnings.append(f"Документ {row['id']} исключён из поиска: индекс или версия не согласованы; проверьте индекс документа.")
+    if rows and not snapshots:
+        raise ValueError('No valid ready publication remains')
     return snapshots
 
 
@@ -167,8 +176,8 @@ class Searcher:
             raise component_error("model_unavailable", "Для BM25 требуется пакет rank-bm25.") from exc
 
     async def _search(self, request, subqueries):
-        snapshots = _snapshot(self.store)
         warnings = []
+        snapshots = _snapshot(self.store, warnings, vectors=self.settings.ml_enabled)
         visible, repeal_warnings, amend_pairs = _visible(snapshots, request.as_of or date.today())
         fragments = [f for _, shard in visible for f in shard]
         by_id = {f.id: f for f in fragments}
@@ -215,34 +224,10 @@ class Searcher:
                     scores = {key: value for key, value in scores.items()
                               if value >= self.settings.rerank_threshold}
                 else:
-                    titles = {m.document_id: (meta.title or "") for m, _, meta in snapshots}
-                    lex_matched = {
-                        fid for fid, frag in by_id.items()
-                        if fid in scores and _has_substantive_match(frag, titles.get(frag.document_id, ""), queries)
-                    }
-                    top_score = max(scores.values()) if scores else -1.0
-                    if top_score <= 0.0 and not lex_matched:
-                        log.info("Reranker returned non-positive scores (top=%.3f) without lexical match; returning no hits.", top_score)
-                        scores = {}
-                    elif len(scores) > 2:
-                        if top_score > 0:
-                            if any(v < 0 for v in scores.values()) or top_score <= 1.0:
-                                cutoff = max(0.05, top_score * 0.35)
-                            else:
-                                cutoff = max(0.0, top_score * 0.25)
-                            filtered = {key: value for key, value in scores.items() if value >= cutoff}
-                            if filtered:
-                                scores = filtered
-                            elif not lex_matched:
-                                scores = {}
-                        elif top_score <= -2.0:
-                            log.info("Reranker returned strongly negative scores (top=%.3f); returning no hits.", top_score)
-                            scores = {}
-                        else:
-                            scores = {
-                                key: value for key, value in scores.items()
-                                if key in lex_matched and value >= max(-2.0, top_score - 1.5)
-                            }
+                    # Logits have no calibrated relevance boundary. In particular,
+                    # a negative top score must not discard a semantic match.
+                    # Admission of claims belongs to evidence/semantic validation.
+                    warnings.append("Порог reranker не откалиброван; качество выдачи не подтверждено.")
             except (ComponentError, TimeoutError, ImportError, ValidationError) as exc:
                 log.warning("Hybrid search fell back to BM25 (%s)", type(exc).__name__)
                 hybrid = False

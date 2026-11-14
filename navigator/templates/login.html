@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <title>Вход · Altropos</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/login.js" defer></script>
+</head>
+<body class="login-body">
+  <main class="login-card" aria-labelledby="login-title">
+    <a class="brand login-brand" href="/" aria-label="Altropos Navigator">
+      <span class="brand__mark" aria-hidden="true">A</span>
+      <span class="brand__text">
+        <span class="brand__name">Altropos</span>
+        <span class="brand__subtitle">навигатор по регламентам</span>
+      </span>
+    </a>
+    <h1 id="login-title">Вход</h1>
+
+    {% if message %}
+      <p class="callout callout--error" role="alert">{{ message }}</p>
+    {% endif %}
+
+    <form method="post" action="/login" class="stack-form" id="login-form" autocomplete="on">
+      <input type="hidden" name="next" value="{{ next_url }}">
+      <div class="field">
+        <label for="login-username">Логин</label>
+        <input type="text" id="login-username" name="username" autocomplete="username"
+               autocapitalize="none" spellcheck="false" maxlength="200" required
+               {% if demo %}value="{{ demo_username }}"{% endif %}>
+      </div>
+      <div class="field">
+        <label for="login-password">Пароль</label>
+        <input type="password" id="login-password" name="password" autocomplete="current-password"
+               maxlength="512" required {% if demo %}value="{{ demo_password }}"{% endif %}>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="button button--primary" id="login-submit">Войти</button>
+        {% if admin_available %}
+          <button type="button" class="button button--ghost" id="login-admin" hidden>Я администратор</button>
+        {% endif %}
+      </div>
+    </form>
+
+    {% if demo %}
+      <p class="field__hint">
+        Поля заполнены автоматически: это общий демонстрационный вход. Он открывает все функции
+        — вопросы, документы, загрузку и импорт, — но не проверку и подтверждение распознавания.
+      </p>
+    {% endif %}
+    {% if admin_available %}
+      <p class="field__hint">
+        Проверка и подтверждение распознавания доступны только администратору с отдельными
+        учётными данными: нажмите «Я администратор» и введите их.
+      </p>
+    {% endif %}
+  </main>
+</body>
+</html>

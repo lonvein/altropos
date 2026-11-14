@@ -9,7 +9,8 @@
   <script src="/static/js/common.js" defer></script>
   {% block head %}{% endblock %}
 </head>
-<body data-data-mode="{{ integration.data_mode }}" data-profile="{{ profile }}">
+<body data-data-mode="{{ integration.data_mode }}" data-profile="{{ profile }}"
+      data-role="{{ 'admin' if is_admin else 'user' }}">
   <a class="skip-link" href="#main">Перейти к содержимому</a>
 
   <header class="site-header">
@@ -27,7 +28,7 @@
            {% if page == 'ask' %}aria-current="page"{% endif %}>Задать вопрос</a>
         <a href="/documents" class="main-nav__link{% if page == 'documents' %} is-active{% endif %}"
            {% if page == 'documents' %}aria-current="page"{% endif %}>Документы</a>
-        {% if not reader_mode %}
+        {% if is_admin %}
           <a href="/review" class="main-nav__link">Проверка распознавания</a>
         {% endif %}
       </nav>
@@ -37,6 +38,17 @@
         <span class="health-pill__dot" aria-hidden="true"></span>
         <span id="health-pill-text">Состояние: проверка…</span>
       </button>
+
+      {% if auth_required %}
+      <div class="header-user">
+        <span class="muted" title="{{ 'Администратор' if is_admin else 'Пользователь' }}">
+          {{ username }}{% if is_admin %} · администратор{% endif %}
+        </span>
+        <form method="post" action="/logout">
+          <button type="submit" class="button button--ghost button--compact">Выйти</button>
+        </form>
+      </div>
+      {% endif %}
     </div>
   </header>
 

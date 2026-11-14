@@ -362,7 +362,7 @@ def test_stopword_only_overlap_does_not_match_out_of_corpus_query(tmp_path):
     assert not any("Период действия" in w for w in res.warnings)
 
 
-def test_negative_reranker_scores_with_no_lexical_match_return_empty_hits(tmp_path):
+def test_uncalibrated_negative_logits_are_candidates_not_absence_of_answer(tmp_path):
     class NegativeReranker(Reranker):
         async def rerank(self, request):
             self.calls.append(request)
@@ -386,11 +386,12 @@ def test_negative_reranker_scores_with_no_lexical_match_return_empty_hits(tmp_pa
     Indexer(store, config, emb).index_document(doc.id, fragments)
     res = search(store, config, question="Как зовут Ливанова, кто это?", embeddings=emb, reranker=NegativeReranker(config))
     assert res.mode == "hybrid"
-    assert res.hits == []
-    assert not any("Период действия" in w for w in res.warnings)
+    assert len(res.hits) == 4
+    assert res.hits[0].score == -4.0
+    assert any('не откалиброван' in w for w in res.warnings)
 
 
-def test_weak_positive_reranker_outlier_below_cutoff_rejected(tmp_path):
+def test_uncalibrated_small_positive_logits_are_not_arbitrarily_thresholded(tmp_path):
     class WeakOutlierReranker(Reranker):
         async def rerank(self, request):
             self.calls.append(request)
@@ -413,4 +414,5 @@ def test_weak_positive_reranker_outlier_below_cutoff_rejected(tmp_path):
     emb = Embeddings(config)
     Indexer(store, config, emb).index_document(doc.id, fragments)
     res = search(store, config, question="Как зовут Ливанова, кто это?", embeddings=emb, reranker=WeakOutlierReranker(config))
-    assert res.hits == []
+    assert len(res.hits) == 4
+    assert res.hits[0].score == 0.02

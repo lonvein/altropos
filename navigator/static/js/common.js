@@ -199,6 +199,16 @@
       });
     }
     const payload = await readJson(response);
+    if (response.status === 401 && !url.startsWith("/login")) {
+      // The signed session ended: go back to the login page and return here afterwards.
+      const here = `${window.location.pathname}${window.location.search}`;
+      window.setTimeout(() => window.location.assign(`/login?next=${encodeURIComponent(here)}`), 600);
+      throw new ApiError("Сессия завершена. Выполните вход заново.", {
+        status: 401,
+        code: "auth_required",
+        details: payload,
+      });
+    }
     if (!response.ok) {
       const info = extractError(payload);
       throw new ApiError(info.message, {
@@ -231,6 +241,12 @@
         return "Модель вернула некорректный ответ. Результат не показан, чтобы не вводить в заблуждение.";
       case "context_exceeded":
         return "Вопрос или найденные материалы не помещаются в контекст модели. Сократите вопрос.";
+      case "auth_required":
+        return "Сессия завершена. Выполните вход заново.";
+      case "admin_required":
+        return "Проверка и подтверждение распознавания доступны только администратору.";
+      case "csrf":
+        return "Запрос отклонён: обновите страницу и повторите действие.";
       case "busy":
         return "Сервис занят обработкой другого запроса. Повторите вручную через некоторое время.";
       case "not_ready":
@@ -255,7 +271,7 @@
       return "Сервис модели вернул ошибку. Вопрос сохранён.";
     }
     if (error.status === 403) {
-      return "Операция доступна только в административном режиме; просмотр документов, поиск и вопросы открыты всем.";
+      return error.message || "Операция недоступна для вашей учётной записи.";
     }
     if (error.status === 422) {
       return error.message || "Проверьте параметры запроса.";
