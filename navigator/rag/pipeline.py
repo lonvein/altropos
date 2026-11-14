@@ -1,5 +1,6 @@
 """Request orchestration over pinned publications; no model or device loading."""
 import json
+import logging
 import sqlite3
 from contextlib import nullcontext
 from datetime import date
@@ -11,12 +12,15 @@ from pydantic import ValidationError
 from navigator.config import Settings
 from navigator.db import Store, fragments_digest
 from navigator.interfaces import ComponentError, LLMClient, Searcher
+from navigator.rag.retrieval import _substantive_tokens
 from navigator.rag.validation import validate_answer, validate_draft
 from navigator.schemas import (
     AskRequest, AskResponse, Document, Draft, Fragment, GenerationRequest, IndexManifest,
     MetadataPatch, SearchRequest, SearchResult, Source, Timings, Verification,
     VerificationRequest,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _is_definitional_question(question: str) -> bool:
@@ -40,12 +44,77 @@ def _is_definitional_question(question: str) -> bool:
 
 
 def _context_tokens(candidate: list[Fragment]) -> int:
-    compact = [
-        {"id": f.id, "section": f.section, "text": f.text}
-        for f in candidate
-    ]
-    size = len(json.dumps(compact, ensure_ascii=False))
-    return ceil(size / 2)
+    if len(candidate) <= 1:
+        compact = [
+            {"id": f.id, "section": f.section, "text": f.text}
+            for f in candidate
+        ]
+        size = len(json.dumps(compact, ensure_ascii=False))
+        return ceil(size / 2)
+    serialized = json.dumps([f.model_dump(mode="json") for f in candidate], ensure_ascii=False)
+    return ceil(len(serialized) / 1.75)
+
+
+def _compact_fragment_for_context(fragment: Fragment, question: str, max_chars: int) -> Fragment:
+    """Return a verbatim contiguous sub-slice of fragment.text fits within max_chars."""
+    text = fragment.text
+    if len(text) <= max_chars:
+        return fragment
+    q_terms = [t for t in _substantive_tokens(question) if len(t) >= 3]
+    lines = text.splitlines(keepends=True)
+    if len(lines) > 1:
+        best_idx = 0
+        best_score = -1
+        for idx, line in enumerate(lines):
+            low = line.lower().replace("ё", "е")
+            score = sum(
+                1 for term in q_terms
+                if (term[:max(4, len(term) - 2)] if len(term) >= 5 else term) in low
+            )
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        start_idx = best_idx
+        end_idx = best_idx + 1
+        while True:
+            cur_len = sum(len(lines[i]) for i in range(start_idx, end_idx))
+            expanded = False
+            if start_idx > 0 and cur_len + len(lines[start_idx - 1]) <= max_chars:
+                start_idx -= 1
+                cur_len += len(lines[start_idx])
+                expanded = True
+            if end_idx < len(lines) and cur_len + len(lines[end_idx]) <= max_chars:
+                cur_len += len(lines[end_idx])
+                end_idx += 1
+                expanded = True
+            if not expanded:
+                break
+        slice_text = "".join(lines[start_idx:end_idx]).strip()
+        if slice_text and slice_text in text and len(slice_text) >= min(80, max_chars // 2):
+            return fragment.model_copy(update={"text": slice_text})
+
+    low_full = text.lower().replace("ё", "е")
+    anchor = 0
+    for term in q_terms:
+        stem = term[:max(4, len(term) - 2)] if len(term) >= 5 else term
+        pos = low_full.find(stem)
+        if pos >= 0:
+            anchor = pos
+            break
+    start = max(0, anchor - max_chars // 3)
+    end = min(len(text), start + max_chars)
+    if start > 0:
+        ws = text.find(" ", start, min(len(text), start + 40))
+        if ws > start:
+            start = ws + 1
+    if end < len(text):
+        ws = text.rfind(" ", max(start + 1, end - 40), end)
+        if ws > start:
+            end = ws
+    excerpt = text[start:end].strip()
+    if not excerpt or excerpt not in text:
+        excerpt = text[:max_chars].strip()
+    return fragment.model_copy(update={"text": excerpt})
 
 
 def _definition_complete_override(issues: list[str] | None) -> bool:
@@ -135,10 +204,16 @@ class AnswerPipeline:
         mode = "bm25"
         sources = []
 
-        def fallback(message, status="not_found"):
+        def fallback(message, status="not_found", *, cited_titles: set[str] | None = None):
+            cleaned_warnings = _filter_answer_warnings(warnings, cited_titles or set())
+            if status == "not_found":
+                cleaned_warnings = [
+                    w for w in cleaned_warnings
+                    if w != "Контекст сокращён; полнота ответа не подтверждается."
+                ]
             return AskResponse(status=status, mode=mode, answer_mode="sources_only",
                                sources=sources, timings=timings,
-                               warnings=list(dict.fromkeys(warnings + [message])))
+                               warnings=list(dict.fromkeys(cleaned_warnings + [message])))
 
         started = perf_counter()
         try:
@@ -150,7 +225,8 @@ class AnswerPipeline:
             result = SearchResult.model_validate(payload, strict=True)
             mode, warnings = result.mode, list(result.warnings)
             fragments, sources, rejected = self._sources(result, as_of)
-        except (ComponentError, OSError, sqlite3.Error, ValueError, TimeoutError):
+        except (ComponentError, OSError, sqlite3.Error, ValueError, TimeoutError, RuntimeError) as exc:
+            log.warning("Search stage failed (%s)", type(exc).__name__)
             return fallback("Поиск временно недоступен или снимок индекса повреждён; повторите запрос.",
                             "unavailable")
         finally:
@@ -162,27 +238,36 @@ class AnswerPipeline:
         if self.llm is None or not self.settings.llm_enabled:
             return fallback("LLM отключена; приведены только источники без выводов и проверки полноты.")
 
-        # ceil(UTF-8 bytes / 3) is only a rough token estimate for admission;
-        # it is not a token count or a guarantee that the materials fit.
-        # The concrete client checks its real tokenizer for every model call.
+        # Conservative admission check against profile budget; bounded context-reduction
+        # retries handle exact tokenizer overflows from prompt/schema/repair overhead.
         is_definitional = _is_definitional_question(request.question)
+        effective_budget = min(
+            self.settings.context_budget,
+            max(1, self.settings.context_size - self.settings.max_output_tokens - self.settings.prompt_reserve_tokens),
+        )
         selected = []
         for fragment in fragments[:self.settings.top_fragments]:
             candidate = selected + [fragment]
-            if _context_tokens(candidate) <= self.settings.context_budget:
+            budget_limit = self.settings.context_budget if len(candidate) == 1 else effective_budget
+            if _context_tokens(candidate) <= budget_limit:
                 selected = candidate
         if is_definitional and selected and not rejected:
             limited = False
         else:
             limited = rejected or len(selected) < len(fragments)
-        if limited:
-            warnings.append("Контекст сокращён; полнота ответа не подтверждается.")
+        if not selected and fragments and self.settings.context_budget >= 256:
+            max_single_chars = max(350, int(self.settings.context_budget * 1.4))
+            compacted = _compact_fragment_for_context(fragments[0], request.question, max_single_chars)
+            if _context_tokens([compacted]) <= self.settings.context_budget:
+                selected = [compacted]
+                limited = True
         if not selected:
             return fallback("Материалы не помещаются в бюджет контекста; приведены только источники.")
 
-        generation = GenerationRequest(question=request.question, as_of=as_of, fragments=selected)
         client = self.llm
         protocol_failed = False
+        context_shrunk = False
+        compaction_steps = 0
 
         async def timed_call(stage, operation):
             start = perf_counter()
@@ -193,91 +278,134 @@ class AnswerPipeline:
 
         try:
             async with client.sequence() if hasattr(client, "sequence") else nullcontext():
-                draft = None
-                issues = []
-                # Exactly two attempts: initial generation and one correction.
-                # If invalid JSON left no Draft, retry generate once unchanged;
-                # the client prompt already requires valid JSON and exact quotes.
-                for attempt in range(2):
-                    try:
-                        if attempt and draft is not None:
-                            if not hasattr(client, "repair"):
-                                break
-                            raw = await timed_call("generation_ms", client.repair(
-                                VerificationRequest(**generation.model_dump(), draft=draft), issues))
-                        else:
-                            raw = await timed_call("generation_ms", client.generate(
-                                generation.model_copy(deep=True)))
-                        # Preserve a structurally valid but quote-invalid draft for repair.
-                        draft = (Draft.model_validate_json(raw) if isinstance(raw, str) else
-                                 Draft.model_validate(raw.model_dump(mode="json")
-                                                      if isinstance(raw, Draft) else raw))
-                        draft = validate_draft(draft, selected)
-                        protocol_failed = False
-                        checked = await timed_call("verification_ms", validate_answer(
-                            draft, selected, question=request.question, client=client, as_of=as_of))
-                        assessment = checked.model_assessment
-                        if not assessment.supported:
-                            issues = ["Смысловая проверка не подтвердила все утверждения."] + assessment.issues
-                            continue
-                        draft = checked.checked_draft
-                        claims = draft.summary + draft.steps
-                        # Model warnings, issues and clarification are unverified prose.
-                        # Only controlled server messages leave this boundary.
-                        verification = Verification(supported=True,
-                            complete=assessment.complete and not limited,
-                            conflict=assessment.conflict or draft.status == "conflict")
-                        if not claims:
-                            status = "ambiguous" if draft.status == "ambiguous" else "not_found"
-                            return AskResponse(status=status, mode=mode, answer_mode="sources_only",
-                                sources=sources, timings=timings,
-                                warnings=list(dict.fromkeys(warnings + ["Модель не подтвердила ответ по источникам."])),
-                                clarification="Уточните вопрос и необходимые условия." if status == "ambiguous" else None)
-                        if is_definitional and not verification.conflict and not limited and draft.status == "answered" and claims and not verification.complete:
-                            if _definition_complete_override(getattr(assessment, "issues", None)):
-                                verification = verification.model_copy(update={"complete": True})
-                        cited_ids = {ev.fragment_id for c in claims for ev in c.evidence}
-                        cited_titles = {s.title for s in sources if s.fragment_id in cited_ids and s.title}
-                        filtered_warnings = _filter_answer_warnings(warnings, cited_titles)
-                        if verification.conflict:
-                            status = "conflict"
-                            filtered_warnings.append("В источниках обнаружено противоречие; окончательный вывод не подтверждён.")
-                        elif verification.complete and draft.status == "answered":
-                            status = "answered"
-                        else:
-                            status = "partial"
-                            if not is_definitional or limited:
-                                filtered_warnings.append("Подтверждена только часть ответа; полнота процедуры не установлена.")
+                while selected:
+                    generation = GenerationRequest(question=request.question, as_of=as_of, fragments=selected)
+                    draft = None
+                    issues = []
+                    context_retried = False
+                    # Exactly two attempts per context slice: initial generation and one correction.
+                    for attempt in range(2):
+                        try:
+                            if attempt and draft is not None:
+                                if not hasattr(client, "repair"):
+                                    break
+                                raw = await timed_call("generation_ms", client.repair(
+                                    VerificationRequest(**generation.model_dump(), draft=draft), issues))
                             else:
-                                filtered_warnings.append("Подтверждена только часть ответа.")
-                        return AskResponse(status=status, summary=draft.summary, steps=draft.steps,
-                            mode=mode, answer_mode="generated", sources=sources,
-                            verification=verification, warnings=list(dict.fromkeys(filtered_warnings)), timings=timings)
-                    except ComponentError as exc:
-                        if exc.detail.code != "invalid_model_output":
-                            raise
-                        protocol_failed = True
-                        # The adapter can reject evidence after parsing a valid
-                        # Draft. Keep a freshly shape-validated copy for repair,
-                        # never as an approved answer or trusted evidence.
-                        rejected_draft = getattr(exc, "draft", None)
-                        if isinstance(rejected_draft, Draft):
-                            try:
-                                draft = Draft.model_validate(
-                                    rejected_draft.model_dump(mode="json"), strict=True)
-                            except ValidationError:
-                                pass
-                        issues = ["Исправьте структуру ответа, ID и дословные цитаты; используйте только переданные материалы."]
-                    except ValidationError:
-                        protocol_failed = True
-                        issues = ["Верните корректный JSON по схеме Draft с дословными цитатами."]
+                                raw = await timed_call("generation_ms", client.generate(
+                                    generation.model_copy(deep=True)))
+                            # Preserve a structurally valid but quote-invalid draft for repair.
+                            draft = (Draft.model_validate_json(raw) if isinstance(raw, str) else
+                                     Draft.model_validate(raw.model_dump(mode="json")
+                                                          if isinstance(raw, Draft) else raw))
+                            draft = validate_draft(draft, selected)
+                            protocol_failed = False
+                            checked = await timed_call("verification_ms", validate_answer(
+                                draft, selected, question=request.question, client=client, as_of=as_of))
+                            assessment = checked.model_assessment
+                            if not assessment.supported:
+                                issues = ["Смысловая проверка не подтвердила все утверждения."] + assessment.issues
+                                continue
+                            draft = checked.checked_draft
+                            claims = draft.summary + draft.steps
+                            effective_limited = limited or context_shrunk or compaction_steps > 0
+                            run_warnings = list(warnings)
+                            if effective_limited and "Контекст сокращён; полнота ответа не подтверждается." not in run_warnings:
+                                run_warnings.append("Контекст сокращён; полнота ответа не подтверждается.")
+                            # Model warnings, issues and clarification are unverified prose.
+                            # Only controlled server messages leave this boundary.
+                            verification = Verification(supported=True,
+                                complete=assessment.complete and not effective_limited,
+                                conflict=assessment.conflict or draft.status == "conflict")
+                            if not claims:
+                                status = "ambiguous" if draft.status == "ambiguous" else "not_found"
+                                filtered_warnings = _filter_answer_warnings(run_warnings, set())
+                                if status == "not_found":
+                                    filtered_warnings = [
+                                        w for w in filtered_warnings
+                                        if w != "Контекст сокращён; полнота ответа не подтверждается."
+                                    ]
+                                    filtered_warnings.append(
+                                        "В предоставленных документах недостаточно сведений для ответа на вопрос."
+                                    )
+                                else:
+                                    filtered_warnings.append("Модель не подтвердила ответ по источникам.")
+                                return AskResponse(status=status, mode=mode, answer_mode="sources_only",
+                                    sources=sources, timings=timings,
+                                    warnings=list(dict.fromkeys(filtered_warnings)),
+                                    clarification="Уточните вопрос и необходимые условия." if status == "ambiguous" else None)
+                            if is_definitional and not verification.conflict and not effective_limited and draft.status == "answered" and claims and not verification.complete:
+                                if _definition_complete_override(getattr(assessment, "issues", None)):
+                                    verification = verification.model_copy(update={"complete": True})
+                            cited_ids = {ev.fragment_id for c in claims for ev in c.evidence}
+                            cited_titles = {s.title for s in sources if s.fragment_id in cited_ids and s.title}
+                            filtered_warnings = _filter_answer_warnings(run_warnings, cited_titles)
+                            if verification.conflict:
+                                status = "conflict"
+                                filtered_warnings.append("В источниках обнаружено противоречие; окончательный вывод не подтверждён.")
+                            elif verification.complete and draft.status == "answered":
+                                status = "answered"
+                            else:
+                                status = "partial"
+                                if not is_definitional or effective_limited:
+                                    filtered_warnings.append("Подтверждена только часть ответа; полнота процедуры не установлена.")
+                                else:
+                                    filtered_warnings.append("Подтверждена только часть ответа.")
+                            return AskResponse(status=status, summary=draft.summary, steps=draft.steps,
+                                mode=mode, answer_mode="generated", sources=sources,
+                                verification=verification, warnings=list(dict.fromkeys(filtered_warnings)), timings=timings)
+                        except ComponentError as exc:
+                            if exc.detail.code == "context_exceeded":
+                                log.warning(
+                                    "Context exceeded with %d fragments (top_chars=%d); trying reduction",
+                                    len(selected),
+                                    len(selected[0].text),
+                                )
+                                if len(selected) > 1:
+                                    selected = selected[:-1]
+                                    context_shrunk = True
+                                    limited = True
+                                    context_retried = True
+                                    break
+                                if len(selected) == 1 and len(selected[0].text) > 500 and compaction_steps < 2:
+                                    compaction_steps += 1
+                                    next_chars = max(350, len(selected[0].text) // 2)
+                                    compacted = _compact_fragment_for_context(selected[0], request.question, next_chars)
+                                    if len(compacted.text) < len(selected[0].text):
+                                        selected = [compacted]
+                                        context_shrunk = True
+                                        limited = True
+                                        context_retried = True
+                                        break
+                                raise
+                            if exc.detail.code != "invalid_model_output":
+                                raise
+                            protocol_failed = True
+                            # The adapter can reject evidence after parsing a valid
+                            # Draft. Keep a freshly shape-validated copy for repair,
+                            # never as an approved answer or trusted evidence.
+                            rejected_draft = getattr(exc, "draft", None)
+                            if isinstance(rejected_draft, Draft):
+                                try:
+                                    draft = Draft.model_validate(
+                                        rejected_draft.model_dump(mode="json"), strict=True)
+                                except ValidationError:
+                                    pass
+                            issues = ["Исправьте структуру ответа, ID и дословные цитаты; используйте только переданные материалы."]
+                        except ValidationError:
+                            protocol_failed = True
+                            issues = ["Верните корректный JSON по схеме Draft с дословными цитатами."]
+                    if not context_retried:
+                        break
         except ComponentError as exc:
+            log.warning("LLM stage ComponentError (%s)", exc.detail.code)
             if exc.detail.code == "context_exceeded":
                 return fallback("Контекст модели превышен; приведены только источники без проверки полноты.",
                                 "unavailable")
             return fallback("Локальная LLM временно недоступна; повторите запрос. Приведены только источники.",
                             "unavailable")
-        except (OSError, TimeoutError):
+        except (OSError, TimeoutError, RuntimeError) as exc:
+            log.warning("LLM stage failure (%s)", type(exc).__name__)
             return fallback("Локальная LLM временно недоступна; повторите запрос. Приведены только источники.",
                             "unavailable")
         return fallback("Ответ не прошёл проверку после одной попытки исправления; приведены только источники.",

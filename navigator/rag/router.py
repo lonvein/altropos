@@ -164,6 +164,7 @@ class _AskJobManager:
                 job["status"] = "completed"
                 job["http_status"] = 200
             except TimeoutError:
+                log.warning("Ask request %s timed out", request_id)
                 job["status"] = "error"
                 job["http_status"] = 504
                 job["error"] = {
@@ -172,6 +173,7 @@ class _AskJobManager:
                     "retryable": True,
                 }
             except ComponentError as exc:
+                log.warning("Ask request %s failed with ComponentError: %s", request_id, exc.detail.code)
                 job["status"] = "error"
                 job["http_status"] = statuses.get(exc.detail.code, 500)
                 job["error"] = {

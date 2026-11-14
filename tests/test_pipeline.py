@@ -415,3 +415,145 @@ def test_adapter_invalid_attached_shape_is_not_used_for_repair(setup):
     model = Model([error, setup[4]], [Verification(supported=True, complete=True)])
     assert ask(setup, model).status == "answered"
     assert kinds(model) == ["generate", "generate", "verify"]
+
+
+def test_missing_information_returns_not_found_without_unrelated_warnings(setup):
+    setup[2].result.warnings.extend([
+        "Период действия «Другой несвязанный приказ» подтверждён не полностью.",
+        "Контекст сокращён; полнота ответа не подтверждается.",
+    ])
+    not_found_draft = Draft(status="not_found", summary=[], steps=[])
+    model = Model([not_found_draft], [Verification(supported=True, complete=True)])
+    response = ask(setup, model, AskRequest(question="Как зовут Ливанова, кто это?", as_of=DAY))
+    assert response.status == "not_found"
+    assert response.answer_mode == "sources_only"
+    assert not any("Период действия" in w for w in response.warnings)
+    assert not any("Контекст сокращён" in w for w in response.warnings)
+
+
+def _setup_two_fragments(tmp_path, text1, text2):
+    store = Store(tmp_path)
+    doc = Document(
+        id="adm-doc", version="v1", name="adm.docx",
+        title="Порядок поступления", sha256="3" * 64,
+        original_path="originals/adm.docx", media_type="docx",
+    )
+    store.register_document(doc)
+    f1 = Fragment(id="adm-f1", document_id=doc.id, document_version="v1", ordinal=0,
+                  text=text1, section="1", locator={"kind": "docx", "block": 0})
+    f2 = Fragment(id="adm-f2", document_id=doc.id, document_version="v1", ordinal=1,
+                  text=text2, section="2", locator={"kind": "docx", "block": 1})
+    artifact = tmp_path / "indexes" / "adm-pub" / "fixture.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"adm fixture")
+    manifest = IndexManifest(
+        publication_id="adm-pub", document_id=doc.id, document_version="v1",
+        fragments_sha256=fragments_digest([f1, f2]), mode="bm25",
+        bm25={"path": "indexes/adm-pub/fixture.json",
+              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()},
+    )
+    store.publish(manifest, [f1, f2], ["BM25 fixture"])
+    result = SearchResult(
+        mode="bm25",
+        warnings=["BM25 only", "Период действия «Порядок поступления» подтверждён не полностью."],
+        publication_ids=[manifest.publication_id],
+        hits=[
+            SearchHit(fragment=f1, rank=1, score=2.0, score_kind="bm25"),
+            SearchHit(fragment=f2, rank=2, score=1.0, score_kind="bm25"),
+        ],
+    )
+    settings = Settings(_env_file=None, llm_enabled=True, llm_revision="artificial-v1")
+    return store, settings, Search(result), f1, f2
+
+
+def test_multi_fragment_context_overflow_retries_with_fewer_fragments(tmp_path):
+    setup2 = _setup_two_fragments(
+        tmp_path,
+        "Для подачи документов на поступление обратитесь в приёмную комиссию.",
+        "Дополнительное приложение о порядке поступления и заполнения форм.",
+    )
+    store, settings, search, f1, f2 = setup2
+    draft = Draft(
+        status="answered",
+        summary=[Claim(text="Подайте документы в приёмную комиссию.",
+                       evidence=[Evidence(fragment_id=f1.id, quote="обратитесь в приёмную комиссию.")])],
+    )
+    model = Model([failure("context_exceeded"), draft], [Verification(supported=True, complete=False)])
+    response = asyncio.run(AnswerPipeline(store, settings, search, model).ask(
+        AskRequest(question="Как подать доки на поступление?", as_of=DAY)))
+    assert response.answer_mode == "generated"
+    assert response.status == "partial"
+    assert kinds(model) == ["generate", "generate", "verify"]
+    gen_calls = [c[1] for c in model.calls if isinstance(c, tuple) and c[0] == "generate"]
+    assert len(gen_calls[0].fragments) == 2
+    assert len(gen_calls[1].fragments) == 1
+    assert any("Контекст сокращён" in w for w in response.warnings)
+    assert len(response.sources) == 2
+
+
+def test_verify_context_overflow_on_multi_fragment_shrinks_and_retries(tmp_path):
+    setup2 = _setup_two_fragments(
+        tmp_path,
+        "Для подачи документов на поступление обратитесь в приёмную комиссию.",
+        "Дополнительный длинный текст.",
+    )
+    store, settings, search, f1, _ = setup2
+    draft = Draft(
+        status="answered",
+        summary=[Claim(text="Обратитесь в приёмную комиссию.",
+                       evidence=[Evidence(fragment_id=f1.id, quote="обратитесь в приёмную комиссию.")])],
+    )
+    model = Model(
+        [draft, draft],
+        [failure("context_exceeded"), Verification(supported=True, complete=False)],
+    )
+    response = asyncio.run(AnswerPipeline(store, settings, search, model).ask(
+        AskRequest(question="Как подать доки на поступление?", as_of=DAY)))
+    assert response.answer_mode == "generated"
+    assert response.status == "partial"
+    assert kinds(model) == ["generate", "verify", "generate", "verify"]
+
+
+def test_single_long_fragment_context_overflow_compacts_and_keeps_verbatim_quote(tmp_path):
+    prefix = "Вводный раздел общего положения. " * 40
+    target = "Для подачи документов на поступление обратитесь в приёмную комиссию через портал."
+    suffix = " Приложение содержит дополнительные образцы заполнения форм." * 20
+    full_text = f"{prefix}\n{target}\n{suffix}"
+    store = Store(tmp_path)
+    doc = Document(
+        id="long-doc", version="v1", name="long.docx",
+        title="Правила", sha256="4" * 64,
+        original_path="originals/long.docx", media_type="docx",
+    )
+    store.register_document(doc)
+    frag = Fragment(id="long-f1", document_id=doc.id, document_version="v1", ordinal=0,
+                    text=full_text, section="1", locator={"kind": "docx", "block": 0})
+    artifact = tmp_path / "indexes" / "long-pub" / "fixture.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"long fixture")
+    manifest = IndexManifest(
+        publication_id="long-pub", document_id=doc.id, document_version="v1",
+        fragments_sha256=fragments_digest([frag]), mode="bm25",
+        bm25={"path": "indexes/long-pub/fixture.json",
+              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()},
+    )
+    store.publish(manifest, [frag], ["BM25 fixture"])
+    search = Search(SearchResult(
+        mode="bm25", warnings=["BM25 only"], publication_ids=[manifest.publication_id],
+        hits=[SearchHit(fragment=frag, rank=1, score=1.0, score_kind="bm25")],
+    ))
+    settings = Settings(_env_file=None, llm_enabled=True, llm_revision="artificial-v1")
+    draft = Draft(
+        status="answered",
+        summary=[Claim(text="Обратитесь в приёмную комиссию через портал.",
+                       evidence=[Evidence(fragment_id=frag.id, quote=target)])],
+    )
+    model = Model([failure("context_exceeded"), draft], [Verification(supported=True, complete=False)])
+    response = asyncio.run(AnswerPipeline(store, settings, search, model).ask(
+        AskRequest(question="Как подать доки на поступление?", as_of=DAY)))
+    assert response.answer_mode == "generated"
+    assert response.status == "partial"
+    gen_calls = [c[1] for c in model.calls if isinstance(c, tuple) and c[0] == "generate"]
+    assert len(gen_calls[1].fragments[0].text) < len(full_text)
+    assert gen_calls[1].fragments[0].text in full_text
+    assert target in gen_calls[1].fragments[0].text

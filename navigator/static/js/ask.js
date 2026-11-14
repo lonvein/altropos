@@ -58,6 +58,7 @@
   const sourceById = new Map();
   let currentController = null;
   let activePollRun = 0;
+  let activePollRequestId = null;
   let isUnloading = false;
   let userCancelled = false;
 
@@ -66,6 +67,27 @@
   });
   window.addEventListener("beforeunload", () => {
     isUnloading = true;
+  });
+  window.addEventListener("pageshow", (event) => {
+    isUnloading = false;
+    if (event.persisted) {
+      restoreAskState();
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      isUnloading = false;
+      const saved = readJobState();
+      if (
+        saved &&
+        saved.status === "running" &&
+        saved.requestId &&
+        !currentController &&
+        activePollRequestId !== saved.requestId
+      ) {
+        restoreAskState();
+      }
+    }
   });
 
   function generateRequestId() {
@@ -403,13 +425,15 @@
 
   async function pollAskJob(requestId, questionText, asOfValue, startedAt) {
     const pollRun = ++activePollRun;
+    activePollRequestId = requestId;
     const deadlineMs = Math.max(10, timeoutSeconds) * 1000;
     const originMs = typeof startedAt === "number" ? startedAt : Date.now();
     userCancelled = false;
     setLoading(true);
     A.setText(state, "Запрос выполняется на сервере… Ответ сохранится даже при переходе на другую вкладку.");
 
-    while (pollRun === activePollRun && !isUnloading && !userCancelled) {
+    try {
+      while (pollRun === activePollRun && !isUnloading && !userCancelled) {
       if (Date.now() - originMs > deadlineMs + 15000) {
         showRequestError(
           "Превышено время ожидания ответа. Вопрос сохранён; повторите проверку или отправку позже.",
@@ -477,7 +501,12 @@
           return;
         }
       }
-      await A.delay(800);
+        await A.delay(800);
+      }
+    } finally {
+      if (activePollRun === pollRun && activePollRequestId === requestId) {
+        activePollRequestId = null;
+      }
     }
   }
 

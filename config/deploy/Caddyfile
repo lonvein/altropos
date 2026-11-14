@@ -1,15 +1,13 @@
 # Integration template: do not replace an existing VPS proxy configuration.
 # Requires SSH local forwarding on VPS 127.0.0.1:18000 -> laptop 127.0.0.1:18000.
+# Public read/search/ask access is open without mandatory login; administrative
+# write routes remain blocked by ReaderGateway and require the private admin port.
 aitropos.ru {
 	route {
-		basic_auth {
-			{$ALTROPOS_READER_USER} {$ALTROPOS_READER_HASH}
-		}
 		request_body {
 			max_size 32KB
 		}
 		reverse_proxy 127.0.0.1:18000 {
-			header_up -Authorization
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 110s

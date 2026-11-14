@@ -44,6 +44,9 @@ def main():
                         time.sleep(0.5)
                     else:
                         raise RuntimeError("Server did not start")
+                    assert client.get("/documents").status_code == 200
+                    assert client.get("/api/documents").status_code == 200
+                    assert client.get("/api/ask/active").status_code == 200
                     assert client.get("/review").status_code == 403
                     health = client.get("/health")
                     assert health.status_code == 200
@@ -52,7 +55,7 @@ def main():
                     assert client.post("/api/documents").status_code == 403
                     assert client.post("/api/ask", json={}).status_code == 403
                     assert client.post("/api/ask", json={}, headers={"Origin": values["PUBLIC_ORIGIN"]}).status_code == 422
-                    print("PASS: real localhost HTTP, reader boundary, CSRF, schema validation")
+                    print("PASS: real localhost HTTP, open reader tabs, admin boundary, CSRF, schema validation")
             finally:
                 child.terminate()
                 child.wait(timeout=20)

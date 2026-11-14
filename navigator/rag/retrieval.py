@@ -1,6 +1,7 @@
 """Snapshot retrieval: global BM25, normalized FAISS/IP, RRF(60), pinned reranker."""
 import asyncio
 import json
+import logging
 import math
 import sqlite3
 from datetime import date
@@ -14,6 +15,43 @@ from navigator.rag.indexing import (BM25_WARNING, component_error, embed, load_v
                                     tokens, validate_lexical)
 from navigator.schemas import (Fragment, IndexManifest, MetadataPatch, RerankRequest,
                                RerankResponse, SearchHit, SearchRequest, SearchResult, Subqueries)
+
+log = logging.getLogger(__name__)
+
+QUERY_STOPWORDS = frozenset({
+    "как", "кто", "что", "это", "такое", "такой", "такая", "такие", "где",
+    "когда", "куда", "откуда", "почему", "зачем", "какой", "какая", "какое",
+    "какие", "каков", "какова", "каковы", "чей", "чья", "чье", "чьи", "зовут",
+    "ли", "же", "бы", "не", "ни", "на", "по", "из", "от", "до", "за", "при",
+    "про", "без", "под", "над", "об", "обо", "во", "со", "ко", "для", "или",
+    "и", "а", "но", "да", "в", "с", "у", "к", "о",
+})
+
+
+def _substantive_tokens(query: str) -> list[str]:
+    return [tok for tok in tokens(query) if tok not in QUERY_STOPWORDS]
+
+
+def _token_stem_matches(query_token: str, doc_tokens: set[str]) -> bool:
+    if query_token in doc_tokens:
+        return True
+    if len(query_token) >= 5:
+        stem = query_token[:max(4, len(query_token) - 2)]
+        return any(tok.startswith(stem) for tok in doc_tokens)
+    return False
+
+
+def _has_substantive_match(fragment: Fragment, title: str, queries: list[str]) -> bool:
+    doc_tokens = set(tokens(fragment.text)) | set(tokens(title))
+    any_substantive = False
+    for query in queries:
+        sub = _substantive_tokens(query)
+        if not sub:
+            continue
+        any_substantive = True
+        if any(_token_stem_matches(tok, doc_tokens) for tok in sub):
+            return True
+    return not any_substantive
 
 
 def rrf(rankings: list[list[str]]) -> dict[str, float]:
@@ -50,7 +88,7 @@ def _snapshot(store):
     return snapshots
 
 
-def _visible(snapshots, as_of, warnings):
+def _visible(snapshots, as_of):
     eligible = {}
     for manifest, fragments, meta in snapshots:
         if meta.reviewed:
@@ -58,6 +96,8 @@ def _visible(snapshots, as_of, warnings):
                 continue
         eligible[manifest.document_id] = (manifest, fragments, meta)
     excluded = {}
+    repeal_warnings: list[tuple[str, str]] = []
+    amend_pairs: list[tuple[str, str]] = []
     # A repeal is an effective event, not a temporary property of the repealer's
     # current validity window. Expiry of the repealer does not revive its target.
     for manifest, fragments, meta in snapshots:
@@ -67,13 +107,13 @@ def _visible(snapshots, as_of, warnings):
             if relation.kind == "repeals":
                 # An issued date is NOT an effective repeal date.
                 if not meta.reviewed or meta.valid_from is None:
-                    warnings.append("Дата вступления отмены в силу не подтверждена.")
+                    repeal_warnings.append((relation.target_id, "Дата вступления отмены в силу не подтверждена."))
                     continue
                 if as_of < meta.valid_from:
                     continue
                 excluded.setdefault(relation.target_id, []).append(relation.target_section)
             elif relation.kind == "amends" and manifest.document_id in eligible:
-                warnings.append("Есть подтверждённая поправка; исходный документ сохранён вместе с ней.")
+                amend_pairs.append((manifest.document_id, relation.target_id))
     visible = []
     for doc_id, (manifest, fragments, meta) in eligible.items():
         sections = excluded.get(doc_id, [])
@@ -81,7 +121,7 @@ def _visible(snapshots, as_of, warnings):
             section is None or f.section == section or f.section.startswith(section + ".")
             for section in sections)]
         visible.append((manifest, fragments))
-    return visible
+    return visible, repeal_warnings, amend_pairs
 
 
 def _bm25(fragments, queries):
@@ -100,7 +140,8 @@ def _bm25(fragments, queries):
                  for term, count in frequency.items()}
     rankings, aggregate = [], {}
     for query in queries:
-        scores = model.get_scores(tokens(query))
+        q_tokens = _substantive_tokens(query) or tokens(query)
+        scores = model.get_scores(q_tokens)
         current = {f.id: float(score) for f, score in zip(fragments, scores) if score > 0}
         ranking = _ordered(current)[:30]
         rankings.append(ranking)
@@ -128,7 +169,7 @@ class Searcher:
     async def _search(self, request, subqueries):
         snapshots = _snapshot(self.store)
         warnings = []
-        visible = _visible(snapshots, request.as_of or date.today(), warnings)
+        visible, repeal_warnings, amend_pairs = _visible(snapshots, request.as_of or date.today())
         fragments = [f for _, shard in visible for f in shard]
         by_id = {f.id: f for f in fragments}
         if len(by_id) != len(fragments):
@@ -173,17 +214,37 @@ class Searcher:
                 if self.settings.threshold_calibrated:
                     scores = {key: value for key, value in scores.items()
                               if value >= self.settings.rerank_threshold}
-                elif len(scores) > 2:
-                    top_score = max(scores.values())
-                    if top_score > 0:
-                        if any(v < 0 for v in scores.values()) or top_score <= 1.0:
-                            cutoff = max(0.05, top_score * 0.35)
+                else:
+                    titles = {m.document_id: (meta.title or "") for m, _, meta in snapshots}
+                    lex_matched = {
+                        fid for fid, frag in by_id.items()
+                        if fid in scores and _has_substantive_match(frag, titles.get(frag.document_id, ""), queries)
+                    }
+                    top_score = max(scores.values()) if scores else -1.0
+                    if top_score <= 0.0 and not lex_matched:
+                        log.info("Reranker returned non-positive scores (top=%.3f) without lexical match; returning no hits.", top_score)
+                        scores = {}
+                    elif len(scores) > 2:
+                        if top_score > 0:
+                            if any(v < 0 for v in scores.values()) or top_score <= 1.0:
+                                cutoff = max(0.05, top_score * 0.35)
+                            else:
+                                cutoff = max(0.0, top_score * 0.25)
+                            filtered = {key: value for key, value in scores.items() if value >= cutoff}
+                            if filtered:
+                                scores = filtered
+                            elif not lex_matched:
+                                scores = {}
+                        elif top_score <= -2.0:
+                            log.info("Reranker returned strongly negative scores (top=%.3f); returning no hits.", top_score)
+                            scores = {}
                         else:
-                            cutoff = max(0.0, top_score * 0.25)
-                        filtered = {key: value for key, value in scores.items() if value >= cutoff}
-                        if filtered:
-                            scores = filtered
+                            scores = {
+                                key: value for key, value in scores.items()
+                                if key in lex_matched and value >= max(-2.0, top_score - 1.5)
+                            }
             except (ComponentError, TimeoutError, ImportError, ValidationError) as exc:
+                log.warning("Hybrid search fell back to BM25 (%s)", type(exc).__name__)
                 hybrid = False
                 scores, score_kind = lexical, "bm25"
                 warnings.append(BM25_WARNING)
@@ -195,6 +256,13 @@ class Searcher:
         selected_ids = _ordered(scores)[:limit]
         selected_documents = {by_id[key].document_id for key in selected_ids}
         eligible_ids = {manifest.document_id for manifest, _ in visible}
+        for target_id, msg in repeal_warnings:
+            if target_id in selected_documents or (selected_documents and target_id in eligible_ids):
+                warnings.append(msg)
+        for src_id, target_id in amend_pairs:
+            if src_id in selected_documents or target_id in selected_documents:
+                warnings.append("Есть подтверждённая поправка; исходный документ сохранён вместе с ней.")
+                break
         # Validity and revision warnings apply only to selected documents with missing dates
         # or unresolved competing amendments/repeals, never unrelated corpus entries.
         for manifest, _, meta in snapshots:

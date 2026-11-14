@@ -343,3 +343,74 @@ def test_index_rejects_reusing_ids_with_new_content(tmp_path):
     with pytest.raises(ComponentError):
         Indexer(store, settings()).index_document(doc.id, changed)
     assert search(store).hits[0].fragment.text == fragments[0].text
+
+
+def test_stopword_only_overlap_does_not_match_out_of_corpus_query(tmp_path):
+    store = Store(tmp_path)
+    doc, fragments = document(
+        store,
+        doc_id="fin-doc",
+        texts=[
+            "Как сформировать таблицу? Это порядок заполнения для подразделений.",
+            "Кто подписывает смету расходов на год?",
+        ],
+        metadata={"title": "Приложение к приказу об утверждении фин. структуры 2026г."},
+    )
+    Indexer(store, settings()).index_document(doc.id, fragments)
+    res = search(store, question="Как зовут Ливанова, кто это?")
+    assert res.hits == []
+    assert not any("Период действия" in w for w in res.warnings)
+
+
+def test_negative_reranker_scores_with_no_lexical_match_return_empty_hits(tmp_path):
+    class NegativeReranker(Reranker):
+        async def rerank(self, request):
+            self.calls.append(request)
+            return RerankResponse(
+                model=self.config.reranker_model,
+                revision=self.config.reranker_revision,
+                scores=[
+                    RerankScore(fragment_id=f.id, score=-4.0 - i)
+                    for i, f in enumerate(request.fragments)
+                ],
+            )
+
+    store, config = Store(tmp_path), settings(True)
+    doc, fragments = document(
+        store,
+        doc_id="fin-doc",
+        texts=[f"Таблица подразделения {i}" for i in range(4)],
+        metadata={"title": "Приложение к приказу об утверждении фин. структуры 2026г."},
+    )
+    emb = Embeddings(config)
+    Indexer(store, config, emb).index_document(doc.id, fragments)
+    res = search(store, config, question="Как зовут Ливанова, кто это?", embeddings=emb, reranker=NegativeReranker(config))
+    assert res.mode == "hybrid"
+    assert res.hits == []
+    assert not any("Период действия" in w for w in res.warnings)
+
+
+def test_weak_positive_reranker_outlier_below_cutoff_rejected(tmp_path):
+    class WeakOutlierReranker(Reranker):
+        async def rerank(self, request):
+            self.calls.append(request)
+            return RerankResponse(
+                model=self.config.reranker_model,
+                revision=self.config.reranker_revision,
+                scores=[
+                    RerankScore(fragment_id=f.id, score=0.02 if i == 0 else -3.0)
+                    for i, f in enumerate(request.fragments)
+                ],
+            )
+
+    store, config = Store(tmp_path), settings(True)
+    doc, fragments = document(
+        store,
+        doc_id="fin-doc",
+        texts=[f"Смета расходов пункт {i}" for i in range(4)],
+        metadata={"title": "Приложение 1"},
+    )
+    emb = Embeddings(config)
+    Indexer(store, config, emb).index_document(doc.id, fragments)
+    res = search(store, config, question="Как зовут Ливанова, кто это?", embeddings=emb, reranker=WeakOutlierReranker(config))
+    assert res.hits == []

@@ -145,11 +145,18 @@ class LocalTransport:
                     raise invalid("Ответ локальной модели слишком большой.")
                 return strict_json(data)
         except HTTPError as exc:
+            raw_err = None
+            error = None
             try:
-                error = ErrorResponse.model_validate(strict_json(exc.read(65536)))
+                raw_err = strict_json(exc.read(65536))
+                error = ErrorResponse.model_validate(raw_err)
             except (ValueError, UnicodeError, OSError):
-                error = None
-            if error and error.error.code == "context_exceeded" and exc.code == 422:
+                pass
+            if isinstance(raw_err, dict):
+                err_obj = raw_err.get("error")
+                if isinstance(err_obj, dict) and err_obj.get("type") == "exceed_context_size_error":
+                    raise failure("context_exceeded", "Вход превышает контекстное окно локальной модели.") from None
+            if error and error.error.code == "context_exceeded" and exc.code in (400, 422):
                 raise failure("context_exceeded", "Вход превышает токенный лимит локальной модели.") from None
             if error and error.error.code == "invalid_model_output" and exc.code == 502:
                 raise invalid() from None

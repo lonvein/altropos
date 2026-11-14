@@ -620,3 +620,10 @@ async def test_interrupted_http_keeps_client_busy_until_thread_finishes(settings
         await asyncio.gather(task, return_exceptions=True)
     assert (await client.generate(request)).status == "not_found"
     assert calls.count("/v1/chat/completions") == 2
+
+
+async def test_llamacpp_exceed_context_size_400_maps_to_context_exceeded(endpoint):
+    url = endpoint(lambda *_: (400, {"error": {"type": "exceed_context_size_error", "message": "exceeds context"}}))
+    with pytest.raises(ComponentError) as exc:
+        await LocalTransport(url, 1).post("/v1/chat/completions", {})
+    assert_code(exc, "context_exceeded")

@@ -12,6 +12,15 @@ from navigator.config import Settings
 
 SUPPORTED = {".pdf", ".docx", ".xlsx", ".html", ".htm"}
 
+# Пять файлов, отложенных для ручного тестирования загрузки (OCR, PDF, DOCX, XLSX).
+DEFAULT_MANUAL_FILENAMES = (
+    "460-1 Открытие ФЛС_приказ об изменении в приказе на открытие ФЛС.pdf",
+    "Регламент бронирования конц зала.pdf",
+    "Приказ и Регламент работы первой линии техподдержки.pdf",
+    "Приказ N 889-1 от 04.04.2023_инструкция по корректировке смет.docx",
+    "Копия Приложение 1б Бланк сметы РЦНИ.xlsx",
+)
+
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()

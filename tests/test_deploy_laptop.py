@@ -26,8 +26,12 @@ def request(path, method="GET", headers=(), body=b"{}"):
 
 @pytest.mark.parametrize("path,method", [
     ("/review", "GET"), ("/review-files/private.html", "GET"),
-    ("/api/documents", "GET"), ("/api/documents", "POST"),
-    ("/api/documents/id/metadata", "PATCH"), ("/api/jobs", "GET"),
+    ("/api/documents", "POST"),
+    ("/api/documents/id/metadata", "PATCH"),
+    ("/api/documents/id/review", "GET"), ("/api/documents/id/review", "POST"),
+    ("/api/documents/id/reocr", "POST"), ("/api/documents/id/retry", "POST"),
+    ("/api/import-url", "POST"),
+    ("/api/jobs", "GET"), ("/api/jobs/job-1", "GET"),
     ("/openapi.json", "GET"),
     ("/api/sources/../documents", "GET"), ("/static/%2e%2e/secret", "GET"),
     ("/api/future-admin-route", "DELETE")])
@@ -35,7 +39,21 @@ def test_private_routes_denied(path, method):
     assert request(path, method) == 403
 
 
-@pytest.mark.parametrize("path", ["/", "/static/app.js", "/api/sources/id-123", "/api/documents/id/original", "/api/documents/id/view"])
+@pytest.mark.parametrize("path", [
+    "/",
+    "/documents",
+    "/favicon.ico",
+    "/static/app.js",
+    "/api/documents",
+    "/api/documents/id/original",
+    "/api/documents/id/view",
+    "/api/documents/id/original-info",
+    "/api/documents/id/original-page/1",
+    "/api/sources/id-123",
+    "/api/sources/id-123/highlight",
+    "/api/ask/active",
+    "/api/ask/status/req-123",
+])
 def test_reader_routes(path):
     assert request(path) == 200
 
@@ -43,6 +61,11 @@ def test_reader_routes(path):
 def test_csrf_and_body_bound():
     valid = [(b"origin", b"https://aitropos.ru"), (b"content-type", b"application/json")]
     assert request("/api/ask", "POST", valid) == 200
+    assert request("/api/search", "POST", valid) == 200
+    assert request("/api/ask", "POST", [(b"origin", b"https://www.aitropos.ru"), valid[1]]) == 200
+    assert request("/api/ask", "POST", [
+        (b"host", b"127.0.0.1:18000"), (b"origin", b"http://127.0.0.1:18000"), valid[1],
+    ]) == 200
     assert request("/api/ask", "POST") == 403
     assert request("/api/ask", "POST", [(b"origin", b"https://evil.test"), valid[1]]) == 403
     assert request("/api/ask", "POST", valid + [valid[0]]) == 403
@@ -208,3 +231,38 @@ def test_windows_supervisor_stops_venv_interpreter_tree(tmp_path):
         assert sock.connect_ex(("127.0.0.1", port)) != 0, "Orphan interpreter still listening"
     with offline_lock(data):
         pass
+
+
+def test_public_tabs_and_ask_work_through_reader_gateway_without_auth(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from navigator.config import Settings
+    from navigator.main import create_app
+
+    settings = Settings(
+        _env_file=None,
+        profile="development",
+        data_dir=tmp_path / "data",
+        review_dir=tmp_path / "review",
+        ml_enabled=False,
+        llm_enabled=False,
+    )
+    monkeypatch.setattr("navigator.main.get_settings", lambda: settings)
+    app = ReaderGateway(create_app(synthetic_fallback=False), "https://aitropos.ru")
+    with TestClient(app) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/documents").status_code == 200
+        docs_res = client.get("/api/documents")
+        assert docs_res.status_code == 200 and docs_res.json()["documents"] == []
+        active_res = client.get("/api/ask/active")
+        assert active_res.status_code == 200 and active_res.json() == {"active": None}
+        ask_res = client.post(
+            "/api/ask",
+            json={"question": "Как зовут Ливанова, кто это?"},
+            headers={"Origin": "https://aitropos.ru", "Content-Type": "application/json"},
+        )
+        assert ask_res.status_code == 200
+        assert ask_res.json()["status"] == "not_found"
+        # Admin/write endpoints stay blocked
+        assert client.get("/review").status_code == 403
+        assert client.post("/api/documents").status_code == 403
+        assert client.patch("/api/documents/missing/metadata", json={}).status_code == 403

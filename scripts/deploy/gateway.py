@@ -1,13 +1,26 @@
-"""Fail-closed public reader surface; authentication belongs to the VPS proxy.
+"""Fail-closed public reader surface with open read/search/ask and admin protection.
 
-Never expose this listener directly: bind loopback and use an SSH tunnel or
-Tailscale Serve restricted to the VPS. Administration uses another private app.
+Never expose the raw backend listener directly: bind loopback and use an SSH tunnel or
+reverse proxy. Administration uses a separate private admin listener.
 """
 import asyncio
 import json
 import os
 import re
 import time
+from urllib.parse import urlparse
+
+
+def _allowed_origins(origin: str) -> set[str]:
+    parsed = urlparse(origin)
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    origins = {origin}
+    if host.startswith("www."):
+        origins.add(f"{parsed.scheme}://{host[4:]}{port}")
+    elif host and host not in {"127.0.0.1", "localhost"}:
+        origins.add(f"{parsed.scheme}://www.{host}{port}")
+    return origins
 
 
 class ReaderGateway:
@@ -15,8 +28,8 @@ class ReaderGateway:
         if not re.fullmatch(r"https://[a-z0-9.-]+(?::[0-9]+)?", origin):
             raise ValueError("PUBLIC_ORIGIN must be an explicit HTTPS origin")
         self.app, self.origin = app, origin
+        self.allowed_origins = _allowed_origins(origin)
         self.busy = False
-        self.next_question = 0.0
         self.body_timeout = body_timeout
         if not 0 < ask_timeout <= 110:
             raise ValueError("Public question deadline must be in (0, 110] seconds")
@@ -55,9 +68,16 @@ class ReaderGateway:
         # Reject ambiguous encodings, traversal and all unlisted future routes.
         if "%" in path or "\\" in path or ".." in path:
             return await reject(403, "Forbidden")
-        read = path == "/" or re.fullmatch(r"/static/[a-zA-Z0-9_./-]+", path) or re.fullmatch(
-            r"/api/(sources/[a-zA-Z0-9_-]+|documents/[a-zA-Z0-9_-]+/(?:original|view))", path)
-        ask = path == "/api/ask" and method == "POST"
+        read = (
+            path in {"/", "/documents", "/favicon.ico"}
+            or path in {"/api/documents", "/api/ask/active"}
+            or re.fullmatch(r"/static/[a-zA-Z0-9_./-]+", path) is not None
+            or re.fullmatch(r"/api/sources/[a-zA-Z0-9_-]+(?:/highlight)?", path) is not None
+            or re.fullmatch(r"/api/documents/[a-zA-Z0-9_-]+/(?:original|view|original-info)", path) is not None
+            or re.fullmatch(r"/api/documents/[a-zA-Z0-9_-]+/original-page/[0-9]+", path) is not None
+            or re.fullmatch(r"/api/ask/status/[a-zA-Z0-9_.:-]+", path) is not None
+        )
+        ask = path in {"/api/ask", "/api/search"} and method == "POST"
         if not ((read and method in {"GET", "HEAD"}) or ask):
             return await reject(403, "Reader access only")
         if not ask:
@@ -66,12 +86,15 @@ class ReaderGateway:
         # Multiple Origin headers are invalid, including identical ones.
         origins = [v.decode("latin1") for k, v in pairs if k.lower() == b"origin"]
         headers = {k.lower(): v for k, v in pairs}
-        if origins != [self.origin] or headers.get(b"content-type", b"").split(b";")[0].strip().lower() != b"application/json":
+        host_header = headers.get(b"host", b"").decode("latin1").strip()
+        loopback_host = host_header.startswith(("127.0.0.1:", "localhost:")) or host_header in {"127.0.0.1", "localhost"}
+        same_loopback_origin = loopback_host and origins == [f"http://{host_header}"]
+        origin_ok = (len(origins) == 1 and origins[0] in self.allowed_origins) or same_loopback_origin
+        if not origin_ok or headers.get(b"content-type", b"").split(b";")[0].strip().lower() != b"application/json":
             return await reject(403, "Same-origin JSON required")
-        if self.busy or time.monotonic() < self.next_question:
+        if self.busy:
             return await reject(429, "Another question is in progress")
         self.busy = True
-        self.next_question = time.monotonic() + 2
         ask_deadline = time.monotonic() + self.ask_timeout
         try:
             body = bytearray()
