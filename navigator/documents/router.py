@@ -12,6 +12,7 @@ from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import Field
 
+from navigator.auth import admin_denied, is_admin_request
 from navigator.documents.highlighting import (
     get_original_info,
     render_original_pdf_page,
@@ -104,6 +105,10 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
 
     @api.patch("/documents/{document_id}/metadata")
     def metadata(request: Request, document_id: str, patch: MetadataPatch):
+        # ``reviewed`` approves a doubtful extraction (a needs_review document is published once it
+        # is set), so it is part of OCR approval and is accepted from the administrator only.
+        if "reviewed" in patch.model_fields_set and not is_admin_request(request):
+            return admin_denied(request)
         svc = current(request)
         if svc.get_document(document_id) is None:
             return _error("not_found", "Документ не найден.", 404)
@@ -169,6 +174,8 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
 
     @api.get("/documents/{document_id}/review")
     def get_review(request: Request, document_id: str):
+        if (denied := admin_denied(request)) is not None:
+            return denied
         svc = current(request)
         try:
             return svc.get_review_detail(document_id)
@@ -177,6 +184,8 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
 
     @api.post("/documents/{document_id}/review")
     def post_review(request: Request, document_id: str, body: ReviewSubmitRequest):
+        if (denied := admin_denied(request)) is not None:
+            return denied
         svc = current(request)
         if svc.get_document(document_id) is None:
             return _error("not_found", "Документ не найден.", 404)
@@ -196,6 +205,8 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
 
     @api.post("/documents/{document_id}/reocr")
     async def post_reocr(request: Request, document_id: str, body: ReocrRequest | None = None):
+        if (denied := admin_denied(request)) is not None:
+            return denied
         svc = current(request)
         if svc.get_document(document_id) is None:
             return _error("not_found", "Документ не найден.", 404)

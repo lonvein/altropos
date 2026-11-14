@@ -8,6 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from navigator.documents import textmatch
+from navigator.documents.pdf_geometry import PDFIUM_LOCK, PageFrame, native_lines, native_words, page_frame
 from navigator.schemas import Fragment
 
 _SPACE_RE = re.compile(r"\s+")
@@ -80,6 +82,8 @@ def _load_font(size_px: int, bold: bool = False):
             r"C:\Windows\Fonts\calibrib.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
         ]
         if bold
         else [
@@ -88,6 +92,8 @@ def _load_font(size_px: int, bold: bool = False):
             r"C:\Windows\Fonts\calibri.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
         ]
     )
     for font_path in candidates:
@@ -101,6 +107,7 @@ def _load_font(size_px: int, bold: bool = False):
         for font_path in (
             r"C:\Windows\Fonts\arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
         ):
             if os.path.isfile(font_path):
                 try:
@@ -154,6 +161,16 @@ def _wrap_text_to_width(text: str, max_width_pt: float, font, measure_scale: flo
         if current:
             result.append(current)
     return result or [""]
+
+
+def _word_boxes(text: str, x: float, y0: float, y1: float, font, measure_scale: float) -> list[dict[str, Any]]:
+    """Per-word boxes of a drawn DOCX line, measured with the font used to render it."""
+    words: list[dict[str, Any]] = []
+    for match in re.finditer(r"\S+", text):
+        left = x + _text_width_pt(text[:match.start()], font, measure_scale)
+        right = x + _text_width_pt(text[:match.end()], font, measure_scale)
+        words.append({"text": match.group(0), "bbox": [round(left, 2), y0, round(max(right, left + 0.5), 2), y1]})
+    return words
 
 
 def _docx_display_text(text: str) -> str:
@@ -276,6 +293,7 @@ def _build_docx_paginated_layout(path: Path | None) -> list[dict[str, Any]] | No
                     "block": block_index,
                     "text": line_text,
                     "bbox": line_bbox,
+                    "words": _word_boxes(line_text, x0, y0, y1, font, measure_scale),
                 })
                 cur_y += line_h
             cur_y += 6.0 if is_heading else 4.5
@@ -358,6 +376,8 @@ def _build_docx_paginated_layout(path: Path | None) -> list[dict[str, Any]] | No
                                 round(min(cell_x1 - 2.0, cell_x0 + pad_x + tw + 3.0), 2),
                                 round(ty + cell_line_h, 2),
                             ],
+                            "words": _word_boxes(ln_txt, round(cell_x0 + pad_x, 2), ty,
+                                                 round(ty + cell_line_h, 2), font, measure_scale),
                         })
                     x_cursor += cw
                 cur_y = row_y1
@@ -392,6 +412,8 @@ def _build_docx_paginated_layout(path: Path | None) -> list[dict[str, Any]] | No
                     "block": block_index,
                     "text": line_text,
                     "bbox": [_DOCX_MARGIN_X, y0, round(_DOCX_MARGIN_X + tw + 3.0, 2), round(y0 + note_line_h, 2)],
+                    "words": _word_boxes(line_text, _DOCX_MARGIN_X, y0, round(y0 + note_line_h, 2),
+                                         note_font, measure_scale),
                 })
                 cur_y += note_line_h
             block_index += 1
@@ -399,6 +421,26 @@ def _build_docx_paginated_layout(path: Path | None) -> list[dict[str, Any]] | No
     if len(_DOCX_LAYOUT_CACHE) >= _DOCX_LAYOUT_CACHE_MAX:
         _DOCX_LAYOUT_CACHE.pop(next(iter(_DOCX_LAYOUT_CACHE)))
     _DOCX_LAYOUT_CACHE[cache_key] = pages
+    return pages
+
+
+def _pdfium_page_sizes(path: Path) -> list[dict[str, Any]]:
+    import pypdfium2 as pdfium
+
+    pages: list[dict[str, Any]] = []
+    with PDFIUM_LOCK:
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            for index in range(len(pdf)):
+                page = pdf[index]
+                try:
+                    w, h = page.get_size()
+                    pages.append({"page": index + 1, "width": round(float(w), 1),
+                                  "height": round(float(h), 1), "rotation": int(page.get_rotation())})
+                finally:
+                    page.close()
+        finally:
+            pdf.close()
     return pages
 
 
@@ -440,25 +482,7 @@ def get_original_info(path: Path | None, media_type: str) -> dict[str, Any]:
 
     pages: list[dict[str, Any]] = []
     try:
-        import pypdfium2 as pdfium
-
-        pdf = pdfium.PdfDocument(str(path))
-        try:
-            for index in range(len(pdf)):
-                page = pdf[index]
-                try:
-                    w, h = page.get_size()
-                    rot = page.get_rotation()
-                    pages.append({
-                        "page": index + 1,
-                        "width": round(float(w), 1),
-                        "height": round(float(h), 1),
-                        "rotation": int(rot),
-                    })
-                finally:
-                    page.close()
-        finally:
-            pdf.close()
+        pages = _pdfium_page_sizes(path)
     except Exception:
         pages = []
 
@@ -562,27 +586,28 @@ def render_original_pdf_page(path: Path, page_number: int, scale: float = 1.75) 
     try:
         import pypdfium2 as pdfium
 
-        pdf = pdfium.PdfDocument(str(path))
-        try:
-            if page_number > len(pdf):
-                raise ValueError(f"Страница {page_number} отсутствует в документе (всего {len(pdf)}).")
-            page = pdf[page_number - 1]
+        with PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(str(path))
             try:
-                bitmap = page.render(scale=scale)
+                if page_number > len(pdf):
+                    raise ValueError(f"Страница {page_number} отсутствует в документе (всего {len(pdf)}).")
+                page = pdf[page_number - 1]
                 try:
-                    image = bitmap.to_pil()
+                    bitmap = page.render(scale=scale)
                     try:
-                        buf = io.BytesIO()
-                        image.save(buf, format="PNG")
-                        return buf.getvalue()
+                        image = bitmap.to_pil()
+                        try:
+                            buf = io.BytesIO()
+                            image.save(buf, format="PNG")
+                            return buf.getvalue()
+                        finally:
+                            image.close()
                     finally:
-                        image.close()
+                        bitmap.close()
                 finally:
-                    bitmap.close()
+                    page.close()
             finally:
-                page.close()
-        finally:
-            pdf.close()
+                pdf.close()
     except ValueError:
         raise
     except Exception:
@@ -595,7 +620,8 @@ def render_original_pdf_page(path: Path, page_number: int, scale: float = 1.75) 
             if page_number > len(pdf.pages):
                 raise ValueError(f"Страница {page_number} отсутствует в документе (всего {len(pdf.pages)}).")
             page = pdf.pages[page_number - 1]
-            image = page.to_image(resolution=int(72 * scale), force_mediabox=True).original
+            with PDFIUM_LOCK:
+                image = page.to_image(resolution=int(72 * scale), force_mediabox=True).original
             buf = io.BytesIO()
             image.save(buf, format="PNG")
             return buf.getvalue()
@@ -614,100 +640,6 @@ def render_original_pdf_page(path: Path, page_number: int, scale: float = 1.75) 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
-
-
-def _match_lines_for_query(
-    lines: list[dict[str, Any]],
-    query_text: str,
-) -> list[dict[str, Any]]:
-    """Find contiguous or high-overlap line boxes matching query_text."""
-    if not lines or not query_text:
-        return []
-
-    target = _norm(_clean_query_for_matching(query_text))
-    if not target:
-        return []
-
-    # 1. Contiguous span alignment across normalized line texts.
-    spans: list[tuple[int, int, int]] = []
-    joined_parts: list[str] = []
-    cursor = 0
-    for idx, ln in enumerate(lines):
-        norm_ln = _norm(ln.get("text", ""))
-        if not norm_ln:
-            continue
-        if joined_parts:
-            joined_parts.append(" ")
-            cursor += 1
-        start = cursor
-        joined_parts.append(norm_ln)
-        cursor += len(norm_ln)
-        spans.append((idx, start, cursor))
-    joined = "".join(joined_parts)
-
-    pos = joined.find(target)
-    if pos == -1 and len(target) > 40:
-        # Try matching normalized lines from a multi-line query.
-        q_lines = [_norm(_clean_query_for_matching(part)) for part in query_text.splitlines()]
-        q_lines = [part for part in q_lines if len(part) >= 8]
-        matched_indices: set[int] = set()
-        for q_ln in q_lines:
-            q_pos = joined.find(q_ln)
-            if q_pos != -1:
-                q_end = q_pos + len(q_ln)
-                for idx, s, e in spans:
-                    if e > q_pos and s < q_end:
-                        matched_indices.add(idx)
-        if matched_indices:
-            return [lines[i] for i in sorted(matched_indices)]
-
-    if pos != -1:
-        end = pos + len(target)
-        matched = [lines[idx] for idx, s, e in spans if e > pos and s < end]
-        if matched:
-            return matched
-
-    # 2. Token overlap fallback restricted to lines with meaningful lexical match.
-    q_words = _words(target)
-    if not q_words:
-        return []
-    matched = []
-    for ln in lines:
-        ln_words = _words(ln.get("text", ""))
-        if not ln_words:
-            continue
-        overlap = q_words & ln_words
-        if len(overlap) >= min(2, len(ln_words)) and (len(overlap) / len(ln_words) >= 0.45 or len(overlap) >= 3):
-            matched.append(ln)
-    return matched
-
-
-def _pdfplumber_page_lines(path: Path | None, page_number: int) -> list[dict[str, Any]]:
-    if path is None or not path.is_file():
-        return []
-    try:
-        import pdfplumber
-
-        with pdfplumber.open(str(path)) as pdf:
-            if page_number < 1 or page_number > len(pdf.pages):
-                return []
-            page = pdf.pages[page_number - 1]
-            ox, oy = page.bbox[:2]
-            pw, ph = float(page.width), float(page.height)
-            out: list[dict[str, Any]] = []
-            for ln in page.extract_text_lines(layout=False, strip=True, return_chars=False):
-                text = (ln.get("text") or "").strip()
-                if not text:
-                    continue
-                x0 = max(0.0, round(float(ln["x0"]) - ox, 2))
-                y0 = max(0.0, round(float(ln["top"]) - oy, 2))
-                x1 = min(round(pw, 2), round(float(ln["x1"]) - ox, 2))
-                y1 = min(round(ph, 2), round(float(ln["bottom"]) - oy, 2))
-                if x1 > x0 and y1 > y0:
-                    out.append({"text": text, "bbox": [x0, y0, x1, y1]})
-            return out
-    except Exception:
-        return []
 
 
 def _format_box(
@@ -737,16 +669,52 @@ def _format_box(
     }
 
 
+def _queries(quote: str | None, body: str) -> list[str]:
+    """Quote first, then the whole fragment; cleaned of synthetic table/outline markers."""
+    seen: list[str] = []
+    for raw in ((quote or "").strip(), body):
+        cleaned = _clean_query_for_matching(raw)
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    return seen
+
+
+def _align_lines(lines: list[dict[str, Any]], queries: list[str], near: list[float] | None = None):
+    """Return (boxes, coverage) for the first query that aligns inside ``lines``.
+
+    ``lines`` carry page-local viewer-frame boxes and, when known, per-word boxes.
+    The result is a list of ``(page, bbox, text)``.
+    """
+    tokens = textmatch.tokens_for_lines(lines)
+    if not tokens:
+        return None
+    for query in queries:
+        span = textmatch.align(tokens, query, near=near)
+        if span is None or not span.tokens:
+            continue
+        result = []
+        by_line: dict[int, list[textmatch.Token]] = {}
+        for token in span.tokens:
+            by_line.setdefault(token.line, []).append(token)
+        for line_index in sorted(by_line):
+            page = int(lines[line_index].get("page") or 0)
+            part = textmatch.Span(tokens=by_line[line_index], coverage=span.coverage, exact=span.exact)
+            for box, text in textmatch.line_boxes(part):
+                result.append((page, box, text))
+        return result, span.coverage
+    return None
+
+
 def _resolve_docx_highlight(
     path: Path | None,
     info: dict[str, Any],
     fragment: Fragment,
     quote: str | None,
 ) -> dict[str, Any]:
-    """Compute per-line highlight boxes on the paginated DOCX layout."""
+    """Compute per-word highlight boxes on the paginated DOCX layout."""
     frag_lines_raw = fragment.text.splitlines()
     frag_body = "\n".join(frag_lines_raw[1:]) if (len(frag_lines_raw) > 1 and " > " in frag_lines_raw[0]) else fragment.text
-    query = (quote or "").strip() or frag_body
+    queries = _queries(quote, frag_body)
 
     layout = _build_docx_paginated_layout(path)
     if not layout:
@@ -766,47 +734,38 @@ def _resolve_docx_highlight(
     all_lines = [ln for p in layout for ln in p["lines"]]
     target_block = getattr(fragment.locator, "block", None)
 
-    matched_lines: list[dict[str, Any]] = []
+    matched: tuple[list[tuple[int, list[float], str]], float] | None = None
+    scopes: list[list[dict[str, Any]]] = []
     if target_block is not None:
-        block_lines = [ln for ln in all_lines if ln.get("block") == target_block]
-        matched_lines = _match_lines_for_query(block_lines, query)
-        if not matched_lines and query != frag_body:
-            matched_lines = _match_lines_for_query(block_lines, frag_body)
+        scopes.append([ln for ln in all_lines if ln.get("block") == target_block])
+        scopes.append([ln for ln in all_lines if int(ln.get("block") or 0) >= int(target_block)])
+    scopes.append(all_lines)
+    for scope in scopes:
+        if scope:
+            matched = _align_lines(scope, queries)
+            if matched:
+                break
 
-    if not matched_lines and target_block is not None:
-        forward_lines = [ln for ln in all_lines if int(ln.get("block") or 0) >= int(target_block)]
-        matched_lines = _match_lines_for_query(forward_lines, query)
-        if not matched_lines and query != frag_body:
-            matched_lines = _match_lines_for_query(forward_lines, frag_body)
-
-    if not matched_lines:
-        matched_lines = _match_lines_for_query(all_lines, query)
-        if not matched_lines and query != frag_body:
-            matched_lines = _match_lines_for_query(all_lines, frag_body)
-
-    if matched_lines:
-        # Choose the page containing the highest concentration of matched lines (tie-break: earliest page).
+    if matched:
+        entries, _coverage = matched
         page_counts: dict[int, int] = {}
-        for ln in matched_lines:
-            pnum = int(ln.get("page") or 1)
-            page_counts[pnum] = page_counts.get(pnum, 0) + 1
-        target_page = max(page_counts.items(), key=lambda item: (item[1], -item[0]))[0]
+        for page, _box, _text in entries:
+            page_counts[page] = page_counts.get(page, 0) + 1
+        target_page = min(page for page in page_counts)
         page_meta = layout[max(0, min(len(layout) - 1, target_page - 1))]
-        pw = float(page_meta["width"])
-        ph = float(page_meta["height"])
-        page_matched = [ln for ln in matched_lines if int(ln.get("page") or 1) == target_page]
-        boxes = [
-            _format_box(target_page, ln["bbox"], pw, ph, ln.get("text", ""))
-            for ln in page_matched
-        ]
+        boxes = []
+        for page, box, text in entries:
+            meta = layout[max(0, min(len(layout) - 1, page - 1))]
+            boxes.append(_format_box(page, box, float(meta["width"]), float(meta["height"]), text))
         return {
             "document_id": fragment.document_id,
             "fragment_id": fragment.id,
             "media_type": "docx",
             "page": target_page,
+            "pages": sorted(page_counts),
             "page_count": len(layout),
-            "page_width": pw,
-            "page_height": ph,
+            "page_width": float(page_meta["width"]),
+            "page_height": float(page_meta["height"]),
             "exact": True,
             "boxes": boxes,
             "notice": None,
@@ -834,6 +793,112 @@ def _resolve_docx_highlight(
     }
 
 
+def _stored_lines(blocks: list[dict[str, Any]], page: int, frame: PageFrame, region: list[float] | None):
+    """Saved extraction lines of ``page`` in viewer-frame coordinates (optionally inside region)."""
+    out: list[dict[str, Any]] = []
+    for blk in blocks:
+        if int(blk.get("page") or 0) != page:
+            continue
+        for ln in blk.get("lines") or []:
+            if not isinstance(ln, dict):
+                continue
+            lbox = _valid_box(ln.get("bbox"))
+            lbox = frame.to_viewer(lbox) if lbox else None
+            if lbox is None:
+                continue
+            if region is not None and not _box_overlaps(lbox, region, pad=1.0):
+                continue
+            words = []
+            for word in ln.get("words") or []:
+                wbox = _valid_box(word.get("bbox")) if isinstance(word, dict) else None
+                wbox = frame.to_viewer(wbox) if wbox else None
+                if wbox is not None:
+                    words.append({"text": str(word.get("text") or ""), "bbox": wbox})
+            out.append({"text": str(ln.get("text") or ""), "bbox": lbox, "words": words, "page": page})
+    return out
+
+
+def _pdf_page_geometry(path: Path | None, info: dict[str, Any], blocks: list[dict[str, Any]], page: int):
+    """(frame, width, height) of a PDF page in the viewer frame, with safe fallbacks."""
+    frame = page_frame(path, page)
+    if frame is not None:
+        return frame, frame.width, frame.height
+    meta = next((p for p in info["pages"] if p["page"] == page), None)
+    size = next((b["page_size"] for b in blocks if int(b.get("page") or 0) == page
+                 and isinstance(b.get("page_size"), (list, tuple)) and len(b["page_size"]) == 2), None)
+    if meta is not None and path is not None and path.is_file():
+        width, height = float(meta["width"]), float(meta["height"])
+    elif size is not None:
+        width, height = float(size[0]), float(size[1])
+    elif meta is not None:
+        width, height = float(meta["width"]), float(meta["height"])
+    else:
+        width, height = 595.0, 842.0
+    return PageFrame(width=width, height=height), width, height
+
+
+def _store_frame(blocks: list[dict[str, Any]], page: int, frame: PageFrame) -> PageFrame:
+    """Frame of the *saved* coordinates of ``page``.
+
+    Text-layer blocks are in pdfplumber's MediaBox frame (``frame`` converts them); OCR
+    blocks are tagged ``frame="viewer"`` because OCR renders what the reader sees.
+    """
+    if any(b.get("frame") == "viewer" for b in blocks if int(b.get("page") or 0) == page):
+        return PageFrame(width=frame.width, height=frame.height)
+    return frame
+
+
+def _pdf_result(fragment: Fragment, info: dict[str, Any], page: int, width: float, height: float,
+                *, exact: bool, boxes: list[dict[str, Any]], notice: str | None) -> dict[str, Any]:
+    return {
+        "document_id": fragment.document_id,
+        "fragment_id": fragment.id,
+        "media_type": "pdf",
+        "page": page,
+        "pages": sorted({int(b["page"]) for b in boxes}) or [page],
+        "page_count": max(info["page_count"], page),
+        "page_width": width,
+        "page_height": height,
+        "exact": exact,
+        "boxes": boxes,
+        "notice": notice,
+    }
+
+
+def _pdf_page_boxes(path, info, fragment, blocks, page, queries, frag_bbox_ext, *, use_region: bool):
+    """Try to place the queries on one page. Returns (frame, w, h, entries) or None."""
+    frame, width, height = _pdf_page_geometry(path, info, blocks, page)
+    store = _store_frame(blocks, page, frame)
+    region = store.to_viewer(frag_bbox_ext) if (use_region and frag_bbox_ext) else None
+    page_blocks = [b for b in blocks if int(b.get("page") or 0) == page]
+    ocr_page = any(b.get("ocr") for b in page_blocks)
+    real_pdf = path is not None and path.is_file() and path.suffix.lower() == ".pdf" and page_frame(path, page) is not None
+
+    def native(scoped: bool):
+        words = native_words(path, page, frame, region=region if scoped else None)
+        return native_lines(words)
+
+    attempts = []
+    if real_pdf and not ocr_page:
+        if region is not None:
+            attempts.append(lambda: native(True))
+        attempts.append(lambda: native(False))
+    attempts.append(lambda: _stored_lines(blocks, page, store, region))
+    if region is not None:
+        attempts.append(lambda: _stored_lines(blocks, page, store, None))
+    if real_pdf and ocr_page:
+        attempts.append(lambda: native(False))
+
+    for build in attempts:
+        lines = [{**ln, "page": page} for ln in build()]
+        if not lines:
+            continue
+        found = _align_lines(lines, queries, near=region)
+        if found:
+            return frame, width, height, found[0]
+    return None
+
+
 def resolve_fragment_highlight(
     path: Path | None,
     media_type: str,
@@ -841,7 +906,12 @@ def resolve_fragment_highlight(
     blocks: list[dict[str, Any]] | None,
     quote: str | None = None,
 ) -> dict[str, Any]:
-    """Compute exact per-line highlight coordinates on the original document page."""
+    """Compute exact per-word highlight coordinates on the original document page.
+
+    Coordinates are produced in the *viewer frame* (what the page image shows), so they
+    stay correct for CropBox, /Rotate and offset MediaBox PDFs; the browser only has to
+    scale the normalized fractions with the image.
+    """
     info = get_original_info(path, media_type)
     if media_type == "docx":
         return _resolve_docx_highlight(path, info, fragment, quote)
@@ -863,174 +933,70 @@ def resolve_fragment_highlight(
             ),
         }
 
+    blocks = blocks or []
     target_page = int(fragment.locator.page)
-    page_meta = next((p for p in info["pages"] if p["page"] == target_page), None)
-    page_blocks = [b for b in (blocks or []) if int(b.get("page") or 0) == target_page]
 
-    # Prefer block page_size if original PDF couldn't be read directly (e.g. unit fixtures).
-    block_page_size = next(
-        (b["page_size"] for b in page_blocks if isinstance(b.get("page_size"), (list, tuple)) and len(b["page_size"]) == 2),
-        None,
-    )
-    if page_meta is not None and path is not None and path.is_file():
-        page_width = float(page_meta["width"])
-        page_height = float(page_meta["height"])
-    elif block_page_size is not None:
-        page_width = float(block_page_size[0])
-        page_height = float(block_page_size[1])
-    elif page_meta is not None:
-        page_width = float(page_meta["width"])
-        page_height = float(page_meta["height"])
-    else:
-        page_width, page_height = 595.0, 842.0
-
-    # Strip injected outline header prefix ("Heading > Subheading\n") when matching body lines.
     frag_lines_raw = fragment.text.splitlines()
     frag_body = "\n".join(frag_lines_raw[1:]) if (len(frag_lines_raw) > 1 and " > " in frag_lines_raw[0]) else fragment.text
-    query = (quote or "").strip() or frag_body
-
+    queries = _queries(quote, frag_body)
     frag_bbox = _valid_box(fragment.locator.bbox)
 
-    # Filter blocks overlapping the fragment bbox when available so repeated text on page doesn't false-match.
-    scoped_blocks = page_blocks
-    if frag_bbox:
-        overlapping = [
-            b for b in page_blocks
-            if (bb := _valid_box(b.get("bbox"))) is not None and _box_overlaps(bb, frag_bbox)
-        ]
-        if overlapping:
-            scoped_blocks = overlapping
+    frame, width, height = _pdf_page_geometry(path, info, blocks, target_page)
 
-    # 1. Try per-line coordinates already saved in extraction blocks.
-    candidate_lines: list[dict[str, Any]] = []
-    for blk in scoped_blocks:
-        for ln in blk.get("lines") or []:
-            if isinstance(ln, dict) and (lbox := _valid_box(ln.get("bbox"))) is not None:
-                candidate_lines.append({"text": str(ln.get("text") or ""), "bbox": lbox})
-
-    matched_lines = _match_lines_for_query(candidate_lines, query)
-    if not matched_lines and query != frag_body:
-        matched_lines = _match_lines_for_query(candidate_lines, frag_body)
-    # If quote/fragment matches the whole scoped block and candidate_lines are all within frag_bbox:
-    if not matched_lines and candidate_lines and frag_bbox:
-        matched_lines = [ln for ln in candidate_lines if _box_overlaps(ln["bbox"], frag_bbox)]
-
-    # 2. If saved blocks didn't carry per-line boxes, inspect original PDF text lines via pdfplumber.
-    if not matched_lines:
-        native_lines = _pdfplumber_page_lines(path, target_page)
-        if frag_bbox:
-            scoped_native = [ln for ln in native_lines if _box_overlaps(ln["bbox"], frag_bbox)]
-        else:
-            scoped_native = native_lines
-        matched_lines = _match_lines_for_query(scoped_native, query)
-        if not matched_lines and query != frag_body:
-            matched_lines = _match_lines_for_query(scoped_native, frag_body)
-        if not matched_lines and frag_bbox and scoped_native:
-            matched_lines = scoped_native
-
-    # 2b. Check adjacent pages if quote spilled across a page boundary and nothing matched on target_page.
-    if not matched_lines and not frag_bbox and path is not None and path.is_file():
-        for adj_page in (target_page + 1, target_page - 1):
-            if 1 <= adj_page <= info["page_count"]:
-                adj_blocks = [b for b in (blocks or []) if int(b.get("page") or 0) == adj_page]
-                adj_candidates = [
-                    {"text": str(ln.get("text") or ""), "bbox": lbox}
-                    for blk in adj_blocks
-                    for ln in (blk.get("lines") or [])
-                    if isinstance(ln, dict) and (lbox := _valid_box(ln.get("bbox"))) is not None
-                ]
-                adj_matched = _match_lines_for_query(adj_candidates, query) or _pdfplumber_page_lines(path, adj_page)
-                if adj_candidates and not adj_matched:
-                    adj_matched = []
-                elif not adj_candidates:
-                    adj_matched = _match_lines_for_query(adj_matched, query)
-                if adj_matched:
-                    target_page = adj_page
-                    adj_meta = next((p for p in info["pages"] if p["page"] == adj_page), None)
-                    if adj_meta is not None:
-                        page_width = float(adj_meta["width"])
-                        page_height = float(adj_meta["height"])
-                    matched_lines = adj_matched
+    # 1. Word-level alignment on the cited page (scoped to the fragment's own block first).
+    placed = _pdf_page_boxes(path, info, fragment, blocks, target_page, queries, frag_bbox, use_region=True)
+    page = target_page
+    # 2. Quote crossing a page boundary / locator off by one page, when no block coordinates pin it.
+    if placed is None and frag_bbox is None:
+        for adjacent in (target_page + 1, target_page - 1):
+            if 1 <= adjacent <= info["page_count"]:
+                placed = _pdf_page_boxes(path, info, fragment, blocks, adjacent, queries, None, use_region=False)
+                if placed is not None:
+                    page = adjacent
                     break
 
-    if matched_lines:
-        boxes = [
-            _format_box(target_page, ln["bbox"], page_width, page_height, ln.get("text", ""))
-            for ln in matched_lines
-        ]
-        return {
-            "document_id": fragment.document_id,
-            "fragment_id": fragment.id,
-            "media_type": "pdf",
-            "page": target_page,
-            "page_count": max(info["page_count"], target_page),
-            "page_width": page_width,
-            "page_height": page_height,
-            "exact": True,
-            "boxes": boxes,
-            "notice": None,
-        }
+    if placed is not None:
+        frame, width, height, entries = placed
+        boxes = [_format_box(page, box, width, height, text) for _, box, text in entries]
+        return _pdf_result(fragment, info, page, width, height, exact=True, boxes=boxes, notice=None)
 
-    # 3. Block-level / locator-level bbox fallback (single box when coordinates genuinely exist).
-    matched_blocks: list[dict[str, Any]] = []
-    for blk in scoped_blocks:
+    # 3. Reviewer-edited text no longer aligns word-for-word: the fragment *is* its block,
+    #    so highlight the block's own saved lines instead of guessing across the page.
+    store = _store_frame(blocks, target_page, frame)
+    region = store.to_viewer(frag_bbox) if frag_bbox else None
+    if region is not None:
+        own = _stored_lines(blocks, target_page, store, region)
+        if own:
+            boxes = [_format_box(target_page, ln["bbox"], width, height, ln["text"]) for ln in own]
+            return _pdf_result(fragment, info, target_page, width, height, exact=True, boxes=boxes, notice=None)
+
+    # 4. Block-level / locator-level bbox (single box when coordinates genuinely exist).
+    q_words = set(textmatch.words_of(queries[0])) if queries else set()
+    matched_blocks: list[tuple[list[float], str]] = []
+    for blk in blocks:
+        if int(blk.get("page") or 0) != target_page:
+            continue
         bbox = _valid_box(blk.get("bbox"))
-        if bbox is None:
+        bbox = store.to_viewer(bbox) if bbox else None
+        if bbox is None or (region is not None and not _box_overlaps(bbox, region)):
             continue
         blk_text = blk.get("text") or ""
         if not blk_text and blk.get("table"):
             blk_text = "\n".join(" ".join(str(c) for c in row) for row in blk["table"])
-        blk_norm = _norm(blk_text)
-        blk_words = _words(blk_text)
-        q_words = _words(_clean_query_for_matching(query))
+        blk_words = set(textmatch.words_of(blk_text))
         overlap = q_words & blk_words
-        if (blk_norm and _norm(_clean_query_for_matching(query)) in blk_norm) or (
-            len(overlap) >= min(2, len(q_words)) and q_words and len(overlap) / len(q_words) >= 0.45
-        ):
-            matched_blocks.append({"text": blk_text, "bbox": bbox})
-
+        if q_words and len(overlap) / len(q_words) >= 0.45 and len(overlap) >= min(2, len(q_words)):
+            matched_blocks.append((bbox, blk_text))
     if matched_blocks:
-        boxes = [
-            _format_box(target_page, mb["bbox"], page_width, page_height, mb["text"])
-            for mb in matched_blocks
-        ]
-        return {
-            "document_id": fragment.document_id,
-            "fragment_id": fragment.id,
-            "media_type": "pdf",
-            "page": target_page,
-            "page_count": max(info["page_count"], target_page),
-            "page_width": page_width,
-            "page_height": page_height,
-            "exact": True,
-            "boxes": boxes,
-            "notice": None,
-        }
+        boxes = [_format_box(target_page, bbox, width, height, text) for bbox, text in matched_blocks]
+        return _pdf_result(fragment, info, target_page, width, height, exact=True, boxes=boxes, notice=None)
 
-    if frag_bbox:
-        return {
-            "document_id": fragment.document_id,
-            "fragment_id": fragment.id,
-            "media_type": "pdf",
-            "page": target_page,
-            "page_count": max(info["page_count"], target_page),
-            "page_width": page_width,
-            "page_height": page_height,
-            "exact": True,
-            "boxes": [_format_box(target_page, frag_bbox, page_width, page_height, frag_body)],
-            "notice": None,
-        }
+    if region is not None:
+        return _pdf_result(fragment, info, target_page, width, height, exact=True,
+                           boxes=[_format_box(target_page, region, width, height, frag_body)], notice=None)
 
-    # 4. Honest fallback when coordinates do not exist anywhere: NEVER draw a fake highlight.
-    return {
-        "document_id": fragment.document_id,
-        "fragment_id": fragment.id,
-        "media_type": "pdf",
-        "page": target_page,
-        "page_count": max(info["page_count"], target_page),
-        "page_width": page_width,
-        "page_height": page_height,
-        "exact": False,
-        "boxes": [],
-        "notice": f"Точное положение фрагмента на странице определить невозможно; открыта страница {target_page} оригинала.",
-    }
+    # 5. Honest fallback when coordinates do not exist anywhere: NEVER draw a fake highlight.
+    return _pdf_result(
+        fragment, info, target_page, width, height, exact=False, boxes=[],
+        notice=f"Точное положение фрагмента на странице определить невозможно; открыта страница {target_page} оригинала.",
+    )

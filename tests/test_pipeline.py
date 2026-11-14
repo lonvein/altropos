@@ -300,7 +300,9 @@ def test_verify_unavailable_does_not_repair(setup):
 def test_context_reduction_prevents_complete_answer(setup):
     # Add a second artificial document with a publication, beyond top_fragments.
     store, settings, search, fragment, draft = setup
-    second = fragment.model_copy(update={"id": "second-fragment", "document_id": "second-doc"})
+    second = fragment.model_copy(update={
+        "id": "second-fragment", "document_id": "second-doc",
+        "text": "Application deadlines and the required attachments are listed in the annex."})
     store.register_document(Document(id="second-doc", version="v1", name="second.pdf",
         title="Second artificial document", sha256="2" * 64,
         original_path="originals/second.pdf", media_type="pdf"))
@@ -312,12 +314,14 @@ def test_context_reduction_prevents_complete_answer(setup):
         bm25={"path": "indexes/second-publication/fixture.json",
               "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()})
     store.publish(manifest, [second], ["Synthetic BM25 fixture"])
-    search.result.hits.append(SearchHit(fragment=second, rank=2, score=0.5, score_kind="bm25"))
+    search.result.hits.append(SearchHit(fragment=second, rank=2, score=0.9, score_kind="bm25"))
     search.result.publication_ids.append(manifest.publication_id)
     settings.top_fragments = 1
     model = Model([draft], [Verification(supported=True, complete=True)])
     response = ask(setup, model)
+    # A comparably relevant, not-yet-covered fragment was left out: a real limit.
     assert response.status == "partial" and not response.verification.complete
+    assert "Контекст сокращён; полнота ответа не подтверждается." in response.warnings
     assert len(model.calls[1][1].fragments) == 1
     assert search.requests[0].limit == 1
     assert len(response.sources) == 2

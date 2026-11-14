@@ -2,22 +2,24 @@
 {% block title %}Документы · Altropos{% endblock %}
 
 {% block content %}
-{% if not reader_mode %}
 <div class="page-grid page-grid--documents">
   <section class="panel panel--form" aria-labelledby="upload-title">
     <div class="panel__header panel__header--compact">
-      <p class="eyebrow">Администрирование</p>
-      <h1 id="upload-title">Загрузить документ</h1>
-      <p class="lead">PDF, DOCX или XLSX. Документ появится в списке и пройдёт обработку в очереди.</p>
+      <p class="eyebrow">Загрузка</p>
+      <h1 id="upload-title">Загрузить документы</h1>
+      <p class="lead">PDF, DOCX, XLSX или HTML. Файлы сами пройдут распознавание, обработку и индексацию, после чего станут доступны в поиске и ответах.</p>
     </div>
 
     <form id="upload-form" class="stack-form" novalidate data-max-upload-mb="{{ max_upload_mb }}">
-      <div class="field">
-        <label for="document-file">Файл</label>
-        <input type="file" id="document-file" name="file" accept=".pdf,.docx,.xlsx"
-               aria-describedby="file-hint" required>
+      <div id="upload-dropzone" class="dropzone">
+        <label for="document-file" class="dropzone__label">
+          <strong>Выберите файлы</strong> или перетащите их сюда
+        </label>
+        <input type="file" id="document-file" name="file" multiple
+               accept=".pdf,.docx,.xlsx,.html,.htm" aria-describedby="file-hint">
         <p id="file-hint" class="field__hint">
-          Поддерживаются PDF, DOCX и XLSX. Не более {{ max_upload_mb }} МБ.
+          PDF, DOCX, XLSX и HTML, можно сразу несколько. Не более {{ max_upload_mb }} МБ каждый.
+          Загрузка начинается сразу, затем файлы распознаются и индексируются автоматически.
         </p>
       </div>
       <p id="upload-field-error" class="field-error" role="alert" hidden></p>
@@ -26,17 +28,13 @@
           <span class="button__label">Загрузить</span>
           <span class="spinner" aria-hidden="true" hidden></span>
         </button>
+        <button type="button" class="button button--secondary" id="upload-retry-failed" hidden>Повторить неудачные</button>
+        <button type="button" class="button button--ghost" id="upload-clear" hidden>Очистить список</button>
         <span id="upload-state" class="form-state" role="status" aria-live="polite"></span>
       </div>
     </form>
 
-    <div id="upload-job" class="job-panel" role="status" aria-live="polite" hidden>
-      <div class="job-panel__head">
-        <strong id="upload-job-label">Задание</strong>
-        <span id="upload-job-status" class="badge status-queued">В очереди</span>
-      </div>
-      <p id="upload-job-detail" class="muted"></p>
-    </div>
+    <ul id="upload-queue" class="upload-queue" aria-label="Очередь загрузки" hidden></ul>
   </section>
 
   <section class="panel panel--form" aria-labelledby="import-title">
@@ -65,26 +63,6 @@
       </div>
     </form>
 
-    <div id="import-result" class="import-result" hidden>
-      <h3 id="import-page-title"></h3>
-      <p id="import-page-excerpt" class="muted"></p>
-      <p id="import-empty" class="callout callout--info" hidden>Разрешённых документов не найдено.</p>
-      <div id="import-filter-field" class="field" hidden>
-        <label for="import-filter">Поиск по списку</label>
-        <input type="search" id="import-filter" maxlength="200" placeholder="Название документа">
-        <p id="import-no-match" class="muted" role="status" hidden>По этому запросу ничего не найдено.</p>
-      </div>
-      <ul id="import-links" class="import-links"></ul>
-      <p id="import-rejected-note" class="field__hint" hidden></p>
-      <div class="form-actions">
-        <button type="button" class="button button--primary" id="import-selected-submit" disabled>
-          Импортировать выбранные
-        </button>
-        <span id="import-selected-state" class="form-state" role="status" aria-live="polite"></span>
-      </div>
-      <ul id="import-outcomes" class="import-links" hidden></ul>
-    </div>
-
     <div id="import-job" class="job-panel" role="status" aria-live="polite" hidden>
       <div class="job-panel__head">
         <strong id="import-job-label">Задание импорта</strong>
@@ -93,8 +71,31 @@
       <p id="import-job-detail" class="muted"></p>
     </div>
   </section>
+  <section id="import-result" class="panel panel--import-result import-result" aria-labelledby="import-page-title" hidden>
+    <h3 id="import-page-title"></h3>
+    <p id="import-page-excerpt" class="muted"></p>
+    <p id="import-empty" class="callout callout--info" hidden>Разрешённых документов не найдено.</p>
+    <div id="import-filter-field" class="field" hidden>
+      <label for="import-filter">Поиск по списку</label>
+      <input type="search" id="import-filter" maxlength="200" placeholder="Название документа">
+      <p id="import-no-match" class="muted" role="status" hidden>По этому запросу ничего не найдено.</p>
+    </div>
+    <div id="import-bulk" class="import-bulk" hidden>
+      <button type="button" class="button button--secondary button--compact" id="import-select-all">Выбрать все</button>
+      <button type="button" class="button button--ghost button--compact" id="import-select-none">Снять выделение</button>
+      <span id="import-count" class="form-state" role="status" aria-live="polite"></span>
+    </div>
+    <ul id="import-links" class="import-links"></ul>
+    <p id="import-rejected-note" class="field__hint" hidden></p>
+    <div class="form-actions">
+      <button type="button" class="button button--primary" id="import-selected-submit" disabled>
+        Импортировать выбранные
+      </button>
+      <span id="import-selected-state" class="form-state" role="status" aria-live="polite"></span>
+    </div>
+    <ul id="import-outcomes" class="import-links import-links--outcomes" hidden></ul>
+  </section>
 </div>
-{% endif %}
 
 <section class="panel panel--documents" aria-labelledby="documents-title">
   <div class="panel__header panel__header--row">
@@ -133,7 +134,6 @@
   </details>
 </section>
 
-{% if not reader_mode %}
 <dialog id="metadata-dialog" class="dialog dialog--metadata" aria-labelledby="metadata-title">
   <div class="dialog__header">
     <div>
@@ -177,13 +177,13 @@
       </div>
     </div>
 
-    <label class="checkbox">
-      <input type="checkbox" id="meta-reviewed">
+    <label class="checkbox" id="meta-reviewed-label">
+      <input type="checkbox" id="meta-reviewed" {% if not is_admin %}disabled{% endif %}>
       <span>Проверено администратором</span>
     </label>
     <p class="field__hint">
       Подтверждение проверки не заменяет публикацию: статус «Готов» назначает сервер
-      после успешной публикации.
+      после успешной публикации.{% if not is_admin %} Эту отметку ставит только администратор.{% endif %}
     </p>
 
     <fieldset class="relations-fieldset">
@@ -207,9 +207,24 @@
     </div>
   </form>
 </dialog>
-{% endif %}
 
 {% include "_source_dialog.html" %}
+
+<template id="upload-item-template">
+  <li class="upload-item">
+    <div class="upload-item__head">
+      <strong class="upload-item__name"></strong>
+      <span class="upload-item__size muted"></span>
+      <span class="badge upload-item__badge"></span>
+    </div>
+    <progress class="upload-item__progress" max="100" value="0" hidden></progress>
+    <p class="upload-item__detail muted"></p>
+    <div class="upload-item__actions">
+      <button type="button" class="button button--secondary button--compact upload-item__retry" hidden>Повторить</button>
+      <button type="button" class="button button--ghost button--compact upload-item__remove">Убрать</button>
+    </div>
+  </li>
+</template>
 
 <template id="document-template">
   <li class="document-card">
@@ -236,17 +251,16 @@
     <div class="document-card__actions">
       <a class="button button--secondary document-card__original" target="_blank" rel="noopener">Оригинал</a>
       <a class="button button--ghost document-card__presentation" target="_blank" rel="noopener" hidden>Полный текст</a>
-      {% if not reader_mode %}
+      {% if is_admin %}
       <button type="button" class="button button--secondary document-card__review">Проверить распознавание</button>
       <button type="button" class="button button--ghost document-card__reocr">Повторить OCR</button>
+      {% endif %}
       <button type="button" class="button button--primary document-card__metadata">Метаданные</button>
       <button type="button" class="button button--secondary document-card__retry" hidden>Повторить обработку</button>
-      {% endif %}
     </div>
   </li>
 </template>
 
-{% if not reader_mode %}
 <template id="relation-template">
   <div class="relation-row">
     <label class="field field--compact">
@@ -286,7 +300,6 @@
     <span class="import-link__reason field__hint" hidden></span>
   </li>
 </template>
-{% endif %}
 {% endblock %}
 
 {% block scripts %}

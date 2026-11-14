@@ -91,7 +91,7 @@ class _AskJobManager:
 
     def __init__(self, max_jobs: int = 50) -> None:
         self._jobs: dict[str, dict] = {}
-        self._in_flight: dict[tuple[str, str], str] = {}
+        self._in_flight: dict[tuple[str, str, str], str] = {}
         self._max_jobs = max_jobs
 
     def _prune(self) -> None:
@@ -107,20 +107,25 @@ class _AskJobManager:
             old_id, _ = completed.pop(0)
             self._jobs.pop(old_id, None)
 
-    def get(self, request_id: str) -> dict | None:
-        return self._jobs.get(request_id)
+    def get(self, request_id: str, owner: str | None = None) -> dict | None:
+        job = self._jobs.get(request_id)
+        # Questions and answers belong to the session that asked them.
+        return job if job is not None and job.get("owner") == owner else None
 
-    def active(self) -> dict | None:
-        running = [job for job in self._jobs.values() if job["status"] == "running"]
+    def active(self, owner: str | None = None) -> dict | None:
+        running = [job for job in self._jobs.values()
+                   if job["status"] == "running" and job.get("owner") == owner]
         if not running:
             return None
         running.sort(key=lambda job: job["updated_at"], reverse=True)
         return running[0]
 
-    def submit(self, app, payload: AskRequest, supplied_id: str | None) -> dict:
-        if supplied_id and supplied_id in self._jobs:
+    def submit(self, app, payload: AskRequest, supplied_id: str | None, owner: str | None = None) -> dict:
+        if supplied_id and supplied_id in self._jobs and self._jobs[supplied_id].get("owner") == owner:
             return self._jobs[supplied_id]
-        dedup_key = (payload.question.strip(), payload.as_of.isoformat() if payload.as_of else "")
+        if supplied_id and supplied_id in self._jobs:
+            supplied_id = None  # never attach to another session's request id
+        dedup_key = (payload.question.strip(), payload.as_of.isoformat() if payload.as_of else "", owner or "")
         existing_id = self._in_flight.get(dedup_key)
         if existing_id and existing_id in self._jobs and self._jobs[existing_id]["status"] == "running":
             return self._jobs[existing_id]
@@ -129,6 +134,7 @@ class _AskJobManager:
         now = time.time()
         job: dict = {
             "request_id": request_id,
+            "owner": owner,
             "dedup_key": dedup_key,
             "question": payload.question,
             "as_of": dedup_key[1] or None,
@@ -226,7 +232,7 @@ def _serialize_job(job: dict) -> dict:
 
 @router.get("/api/ask/status/{request_id}")
 async def ask_status(request_id: str, request: Request):
-    job = _ask_jobs(request.app).get(request_id)
+    job = _ask_jobs(request.app).get(request_id, request.scope.get("altropos.sid"))
     if job is None:
         return _error(404, "not_found", "Запрос не найден.")
     return _serialize_job(job)
@@ -234,7 +240,7 @@ async def ask_status(request_id: str, request: Request):
 
 @router.get("/api/ask/active")
 async def ask_active(request: Request):
-    job = _ask_jobs(request.app).active()
+    job = _ask_jobs(request.app).active(request.scope.get("altropos.sid"))
     return {"active": _serialize_job(job) if job is not None else None}
 
 
@@ -242,7 +248,7 @@ async def ask_active(request: Request):
 async def ask(payload: AskRequest, request: Request):
     manager = _ask_jobs(request.app)
     supplied_id = _valid_request_id(request.headers.get("X-Request-Id"))
-    job = manager.submit(request.app, payload, supplied_id)
+    job = manager.submit(request.app, payload, supplied_id, request.scope.get("altropos.sid"))
     if job["task"] is not None:
         await asyncio.shield(job["task"])
     if job["status"] == "completed":

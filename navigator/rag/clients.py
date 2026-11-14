@@ -275,6 +275,13 @@ class LLMClient:
             raise invalid("LLM вернула неверный результат токенизации.")
         return len(data["tokens"])
 
+    async def count_tokens(self, text: str) -> int:
+        """Exact prompt-payload size from the loaded model's own tokenizer."""
+        if not self.settings.llm_enabled:
+            raise failure("model_unavailable", "Локальная LLM отключена.")
+        async with self.sequence():
+            return await self._tokens(text)
+
     @staticmethod
     def _evidence(draft, fragments):
         texts = {fragment.id: fragment.text for fragment in fragments}
