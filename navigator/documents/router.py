@@ -158,17 +158,30 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
 
     @api.get("/documents/{document_id}/view")
     def document_view(request: Request, document_id: str):
+        def preview():
+            from html import escape
+            svc = current(request)
+            document = svc.store.document(document_id)
+            if document is None:
+                return _error('not_found', 'Документ не найден.', 404)
+            payload = Document.model_validate_json(document['payload'])
+            blocks = (svc.storage.get_extracted_blocks(document_id) or []) if document['status'] == payload.status == 'needs_review' else []
+            html = render_publication(document['title'], document_id, [], blocks=blocks)
+            notice = ('<aside role="status"><strong>Предварительный просмотр. Распознанный текст требует проверки.</strong> '
+                      'Этот текст не используется как подтверждённый источник ответа. '
+                      f'<a href="/api/documents/{escape(document_id, quote=True)}/original">Открыть оригинал</a></aside>')
+            return HTMLResponse(html.replace('<body>', '<body>'+notice, 1), headers=SOURCE_HEADERS)
         rows = current(request).store.rows("""SELECT d.id,d.title,d.sha,d.payload,p.manifest,p.fragments FROM documents d
             JOIN publications p ON p.id=d.active_publication
             WHERE d.status='ready' AND d.id=?""", (document_id,))
         if not rows:
-            return _error("not_found", "Опубликованный документ не найден.", 404)
+            return preview()
         row = rows[0]
         fragments = [Fragment.model_validate(data) for data in json.loads(row["fragments"])]
         try:
             blocks = load_snapshot(current(request), row, fragments)
         except (ValueError, OSError, KeyError, TypeError):
-            return _error("not_ready", "Полный подтверждённый снимок недоступен. Откройте оригинал.", 409)
+            return preview()
         return HTMLResponse(render_publication(row["title"], row["id"], fragments, blocks=blocks), headers=SOURCE_HEADERS)
 
     @api.get("/sources/{fragment_id}")

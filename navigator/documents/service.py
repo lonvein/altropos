@@ -45,11 +45,8 @@ def _resolve_indexer(store: Store, settings: Settings, indexer: Indexer | None =
     if indexer is not None:
         return indexer
     # Never hide import/configuration failures behind an incompatible fake shard.
-    from navigator.rag.clients import EmbeddingsClient
     from navigator.rag.indexing import Indexer as RAGIndexer
-
-    embeddings = EmbeddingsClient(settings) if settings.ml_enabled else None
-    return RAGIndexer(store=store, settings=settings, embeddings=embeddings)
+    return RAGIndexer(store=store, settings=settings)
 
 
 class DocumentService:
@@ -69,10 +66,19 @@ class DocumentService:
         self.queue = JobQueue(store=self.store)
         self.indexer = _resolve_indexer(self.store, self.settings, indexer)
         self.http_transport = http_transport
-        try:
-            self._heal_inconsistent_documents()
-        except Exception:
-            logger.debug("Автовосстановление статусов документов пропущено", exc_info=True)
+        # Construction also occurs during health/search requests. Never run OCR
+        # or create new extraction versions merely by opening a page.
+        for row in self.store.rows("SELECT d.id,d.payload,p.manifest FROM documents d JOIN publications p ON p.id=d.active_publication WHERE d.status='ready'"):
+            try:
+                doc = Document.model_validate_json(row['payload'])
+                manifest = json.loads(row['manifest'])
+                if manifest['document_version'] == doc.version:
+                    continue
+                doc.status = 'needs_review'
+                self.store.execute("UPDATE documents SET status='needs_review',payload=? WHERE id=?", (doc.model_dump_json(), row['id']))
+                logger.warning('Publication version requires review: %s', row['id'])
+            except (ValueError, KeyError, TypeError):
+                logger.warning('Invalid publication requires review: %s', row['id'])
 
     def _require_manual_upload_allowed(self, sha: str) -> None:
         manifest_path = self.settings.corpus_manifest
@@ -171,7 +177,7 @@ class DocumentService:
             job_id = self.queue.enqueue("import_preview", {"url": clean_url})
         return {"job_id": job_id, "status": "queued"}
 
-    def _process_file_payload(self, payload: dict) -> tuple[str, dict]:
+    def _process_file_payload(self, payload: dict, *, review_only: bool = False) -> tuple[str, dict]:
         """Парсит сохранённый файл, извлекает метаданные и при готовности публикует в RAG."""
         doc_id = payload["document_id"]
         version = payload.get("version", "v1")
@@ -184,7 +190,8 @@ class DocumentService:
             raise ValueError("Changed original requires a new immutable document version")
         # Retry/re-OCR flags and historical publications do not approve a new
         # extraction. Initial corpus bytes enter via verified review packages.
-        self._require_manual_upload_allowed(registered["sha"])
+        if not review_only:
+            self._require_manual_upload_allowed(registered["sha"])
         if full_path.suffix.lower() == ".pdf":
             from navigator.ingestion.ocr import make_ocr
             parsed = parse_file(
@@ -234,7 +241,7 @@ class DocumentService:
 
         actionable_warnings = [w for w in parsed.warnings if is_actionable_warning(w)]
         requires_review = (
-            not fragments
+            review_only or not fragments
             or bool(actionable_warnings)
             or (parsed.needs_review and meta.reviewed is not True)
         )
@@ -427,7 +434,8 @@ class DocumentService:
 
         doc_id = payload["document_id"]
         try:
-            final_status, result = self._process_file_payload(payload)
+            final_status, result = (self._process_file_payload(payload, review_only=True)
+                                    if kind == 'review_file' else self._process_file_payload(payload))
             self.queue.complete_job(job_id, status=final_status, result=result)
             return True
         except Exception:
@@ -1001,6 +1009,15 @@ class DocumentService:
         )
         return self.get_review_detail(doc_id)
 
+    def _reprocessing_kind(self, sha: str) -> str:
+        # Explicit retries may extract an existing original for human review.
+        # Uploads and legacy worker flags still cannot publish initial bytes.
+        try:
+            self._require_manual_upload_allowed(sha)
+        except InitialCorpusReviewRequired:
+            return 'review_file'
+        return 'process_file'
+
     def reocr_document(
         self,
         doc_id: str,
@@ -1040,7 +1057,7 @@ class DocumentService:
             )
             con.execute(
                 "INSERT INTO jobs(id, kind, payload) VALUES(?, ?, ?)",
-                (job_id, "process_file", json.dumps(payload, ensure_ascii=False)),
+                (job_id, self._reprocessing_kind(row['sha']), json.dumps(payload, ensure_ascii=False)),
             )
             self._record_review_event(
                 doc_id,
@@ -1077,7 +1094,7 @@ class DocumentService:
             con.execute("UPDATE documents SET status='queued',payload=? WHERE id=?",
                         (doc.model_dump_json(), doc_id))
             con.execute("INSERT INTO jobs(id,kind,payload) VALUES(?,?,?)",
-                        (job_id, "process_file", json.dumps(payload, ensure_ascii=False)))
+                        (job_id, self._reprocessing_kind(row['sha']), json.dumps(payload, ensure_ascii=False)))
         return {"document_id": doc_id, "job_id": job_id, "status": "queued"}
 
     def get_document(self, doc_id: str) -> dict | None:
@@ -1241,7 +1258,7 @@ class DocumentService:
             fragment_id = fragments[0]["id"] if fragments else None
         return {
             "fragment_id": fragment_id,
-            "presentation_url": f"/api/documents/{row['id']}/view" if fragment_id else None,
+            "presentation_url": f"/api/documents/{row['id']}/view",
             "index_url": f"/api/documents/{row['id']}/index",
             "id": row["id"],
             "name": row["name"],

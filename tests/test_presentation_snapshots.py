@@ -70,6 +70,9 @@ def test_reader_refuses_unbound_snapshot_and_mutable_cache(published, corruption
     with TestClient(create_app(document_service=service)) as client:
         for path in [f'/api/documents/{document_id}/view', f'/api/sources/{fragment}']:
             response = client.get(path)
-            assert response.status_code == 409
+            assert response.status_code == (200 if path.endswith('/view') else 409)
             assert 'ARTIFICIAL UNTRUSTED CACHE' not in response.text
-            assert response.json()['error']['code'] == 'not_ready'
+            if path.endswith('/view'):
+                assert 'Предварительный просмотр' in response.text
+            else:
+                assert response.json()['error']['code'] == 'not_ready'

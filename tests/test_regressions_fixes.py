@@ -579,7 +579,7 @@ def test_warning_filtering_never_approves_documents_or_initial_reprocessing(tmp_
     svc_manifest.reocr_document(doc_init.id, reviewer="Администратор")
     assert svc_manifest.process_next_job()
     after_reocr = svc_manifest.get_document(doc_init.id)
-    assert after_reocr["status"] == "failed"
+    assert after_reocr["status"] == "needs_review"
     assert after_reocr["version"] == "v2"
 
 
@@ -761,6 +761,8 @@ def test_heal_incomplete_pdf_pages_reextracts_missing_page_one(tmp_path, monkeyp
     monkeypatch.setattr("navigator.ingestion.ocr.make_ocr", lambda **kw: fake_ocr)
 
     healed = DocumentService(store, cfg, indexer=indexer)
+    assert healed.store.document(doc_id)['active_publication'] == store.document(doc_id)['active_publication']
+    healed._heal_incomplete_pdf_pages(dict(store.document(doc_id)))
     rec = healed.get_document(doc_id)
     assert rec["status"] == "ready"
     row = store.document(doc_id)

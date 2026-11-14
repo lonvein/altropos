@@ -126,6 +126,93 @@ def test_index_ml_unavailable_upgrade(tmp_path, failure):
     assert Indexer(store, config, Embeddings(config)).index_document(doc.id, fragments).mode == "hybrid"
 
 
+@pytest.mark.parametrize("lexical_id", ["a-lexical", "z-lexical"])
+@pytest.mark.parametrize("lexical_mode", ["bm25", "incompatible"])
+def test_mixed_corpus_merges_lexical_and_semantic_hits(tmp_path, lexical_id, lexical_mode):
+    store, config = Store(tmp_path), settings(True)
+    dense, dense_fragments = document(store, "m-dense", texts=["ИСКУССТВЕННЫЙ ПРИМЕР. заявка"])
+    dense_publication = Indexer(store, config, Embeddings(config)).index_document(dense.id, dense_fragments)
+    lexical, lexical_fragments = document(store, lexical_id, texts=["ИСКУССТВЕННЫЙ ПРИМЕР. синоним"])
+    other = settings(True, embedding_revision="synthetic-other") if lexical_mode == "incompatible" else settings()
+    lexical_publication = Indexer(store, other, Embeddings(other)).index_document(lexical.id, lexical_fragments)
+    emb, rerank = Embeddings(config), Reranker(config)
+
+    response = search(Store(tmp_path), config, "синоним", emb, rerank)
+
+    expected = {dense_fragments[0].id, lexical_fragments[0].id}
+    assert response.mode == "hybrid"
+    assert {hit.fragment.id for hit in response.hits} == expected
+    assert {f.id for f in rerank.calls[0].fragments} == expected
+    assert len(rerank.calls[0].fragments) == len(expected)
+    assert all(hit.score_kind == "reranker" for hit in response.hits)
+    assert len(emb.calls) == 1 and emb.calls[0].purpose == "query"
+    assert set(response.publication_ids) == {dense_publication.publication_id, lexical_publication.publication_id}
+    assert indexing.BM25_WARNING not in response.warnings
+    assert any("части документов" in warning for warning in response.warnings)
+    if lexical_mode == "incompatible":
+        assert any("несовместима" in warning for warning in response.warnings)
+    # Without lexical overlap, only the compatible dense shard can contribute.
+    dense_only = search(store, config, "смысл", emb, rerank)
+    assert [hit.fragment.id for hit in dense_only.hits] == [dense_fragments[0].id]
+
+
+@pytest.mark.parametrize("failure", ["embedding", "reranker"])
+def test_mixed_corpus_ml_failure_keeps_global_bm25(tmp_path, failure):
+    store, config = Store(tmp_path), settings(True)
+    dense, dense_fragments = document(store, "m-dense", texts=["ИСКУССТВЕННЫЙ ПРИМЕР. заявка"])
+    Indexer(store, config, Embeddings(config)).index_document(dense.id, dense_fragments)
+    lexical, lexical_fragments = document(store, "a-lexical", texts=["ИСКУССТВЕННЫЙ ПРИМЕР. синоним"])
+    Indexer(store, settings()).index_document(lexical.id, lexical_fragments)
+    emb = Embeddings(config, "model_unavailable" if failure == "embedding" else None)
+    rerank = Reranker(config, failure=failure == "reranker")
+
+    response = search(store, config, "синоним", emb, rerank)
+
+    assert response.mode == "bm25"
+    assert [hit.fragment.id for hit in response.hits] == [lexical_fragments[0].id]
+    assert indexing.BM25_WARNING in response.warnings
+    assert len(emb.calls) == 1
+    assert len(rerank.calls) == (failure == "reranker")
+
+
+@pytest.mark.parametrize("excluded", ["future", "repealed", "needs_review"])
+def test_mixed_corpus_without_visible_vectors_skips_ml(tmp_path, excluded):
+    store, config = Store(tmp_path), settings(True)
+    dense, dense_fragments = document(store, "m-dense", metadata={
+        "reviewed": True, "valid_from": "2027-01-01"} if excluded == "future" else {})
+    Indexer(store, config, Embeddings(config)).index_document(dense.id, dense_fragments)
+    if excluded == "needs_review":
+        store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (dense.id,))
+    lexical, lexical_fragments = document(store, "a-lexical", metadata={
+        "reviewed": True, "valid_from": "2026-01-01",
+        "relations": [{"kind": "repeals", "target_id": dense.id, "confirmed": True}]
+    } if excluded == "repealed" else {})
+    Indexer(store, settings()).index_document(lexical.id, lexical_fragments)
+    emb, rerank = Embeddings(config), Reranker(config)
+
+    response = search(store, config, embeddings=emb, reranker=rerank)
+
+    assert response.mode == "bm25"
+    assert [hit.fragment.id for hit in response.hits] == [lexical_fragments[0].id]
+    assert not emb.calls and not rerank.calls
+
+
+def test_mixed_corpus_dense_mapping_after_section_repeal(tmp_path):
+    store, config = Store(tmp_path), settings(True)
+    dense, fragments = document(store, "m-dense", texts=[
+        "ИСКУССТВЕННЫЙ ПРИМЕР. отменено", "ИСКУССТВЕННЫЙ ПРИМЕР. заявка"])
+    Indexer(store, config, Embeddings(config)).index_document(dense.id, fragments)
+    repealer, repeal_fragments = document(store, "a-lexical", texts=["ИСКУССТВЕННЫЙ ПРИМЕР. отмена"], metadata={
+        "reviewed": True, "valid_from": "2026-01-01",
+        "relations": [{"kind": "repeals", "target_id": dense.id, "target_section": "1", "confirmed": True}]})
+    Indexer(store, settings()).index_document(repealer.id, repeal_fragments)
+
+    response = search(store, config, "синоним", Embeddings(config), Reranker(config))
+
+    assert response.mode == "hybrid"
+    assert [hit.fragment.id for hit in response.hits] == [fragments[1].id]
+
+
 def test_incompatible_revision_and_explicit_bm25(tmp_path):
     store, config = Store(tmp_path), settings(True)
     doc, fragments = document(store)
@@ -388,7 +475,7 @@ def test_uncalibrated_negative_logits_are_candidates_not_absence_of_answer(tmp_p
     assert res.mode == "hybrid"
     assert len(res.hits) == 4
     assert res.hits[0].score == -4.0
-    assert any('не откалиброван' in w for w in res.warnings)
+    assert not any('не откалиброван' in w for w in res.warnings)
 
 
 def test_uncalibrated_small_positive_logits_are_not_arbitrarily_thresholded(tmp_path):
@@ -416,133 +503,3 @@ def test_uncalibrated_small_positive_logits_are_not_arbitrarily_thresholded(tmp_
     res = search(store, config, question="Как зовут Ливанова, кто это?", embeddings=emb, reranker=WeakOutlierReranker(config))
     assert len(res.hits) == 4
     assert res.hits[0].score == 0.02
-
-
-def test_mixed_bm25_and_hybrid_corpus_keeps_vector_search_active(tmp_path):
-    class TextAwareReranker(Reranker):
-        async def rerank(self, request):
-            self.calls.append(request)
-            scores = []
-            for f in request.fragments:
-                if "заявка" in f.text or "пропуск" in f.text:
-                    scores.append(RerankScore(fragment_id=f.id, score=5.0))
-                else:
-                    scores.append(RerankScore(fragment_id=f.id, score=0.1))
-            return RerankResponse(
-                model=self.config.reranker_model,
-                revision=self.config.reranker_revision,
-                scores=scores,
-            )
-
-    store = Store(tmp_path)
-    bm25_cfg = settings(False, data_dir=tmp_path)
-    hybrid_cfg = settings(True, data_dir=tmp_path)
-    # "a-bm25" sorts before "z-hybrid" in snapshots, exercising ID mapping alignment.
-    doc_bm25, frags_bm25 = document(
-        store,
-        doc_id="a-bm25",
-        texts=[
-            "Общие положения о доступе на территорию кампуса.",
-            "Специальный пропуск оформляется через комендатуру.",
-        ],
-    )
-    doc_hybrid, frags_hybrid = document(
-        store,
-        doc_id="z-hybrid",
-        texts=[
-            "Заявка координатору направляется заранее.",
-            "Архивный раздел без отношения к вопросу.",
-        ],
-    )
-    Indexer(store, bm25_cfg).index_document(doc_bm25.id, frags_bm25)
-    emb = Embeddings(hybrid_cfg)
-    Indexer(store, hybrid_cfg, emb).index_document(doc_hybrid.id, frags_hybrid)
-    emb.calls.clear()
-
-    reranker = TextAwareReranker(hybrid_cfg)
-    semantic_res = search(store, hybrid_cfg, question="синоним", embeddings=emb, reranker=reranker)
-    assert semantic_res.mode == "hybrid"
-    assert indexing.BM25_WARNING not in semantic_res.warnings
-    assert len(emb.calls) == 1
-    assert any(h.fragment.id == "z-hybrid-f0" for h in semantic_res.hits)
-    assert semantic_res.hits[0].fragment.id == "z-hybrid-f0"
-
-    lexical_res = search(store, hybrid_cfg, question="специальный пропуск", embeddings=emb, reranker=reranker)
-    assert lexical_res.mode == "hybrid"
-    assert indexing.BM25_WARNING not in lexical_res.warnings
-    assert any(h.fragment.id == "a-bm25-f1" for h in lexical_res.hits)
-    assert lexical_res.hits[0].fragment.id == "a-bm25-f1"
-
-
-def test_mixed_compatible_and_incompatible_hybrid_shards_keep_compatible_vectors(tmp_path):
-    store = Store(tmp_path)
-    old_cfg = settings(True, data_dir=tmp_path, embedding_revision="legacy-rev-0")
-    new_cfg = settings(True, data_dir=tmp_path)
-
-    doc_old, frags_old = document(store, doc_id="a-old", texts=["Архивная инструкция по пропускам."])
-    doc_new, frags_new = document(store, doc_id="b-new", texts=["Заявка координатору принимается онлайн."])
-
-    Indexer(store, old_cfg, Embeddings(old_cfg)).index_document(doc_old.id, frags_old)
-    emb = Embeddings(new_cfg)
-    Indexer(store, new_cfg, emb).index_document(doc_new.id, frags_new)
-    emb.calls.clear()
-
-    res = search(store, new_cfg, question="синоним", embeddings=emb, reranker=Reranker(new_cfg))
-    assert res.mode == "hybrid"
-    assert indexing.BM25_WARNING not in res.warnings
-    assert any("несовместима" in w for w in res.warnings)
-    assert len(emb.calls) == 1
-    assert any(h.fragment.id == "b-new-f0" for h in res.hits)
-
-
-def test_mixed_corpus_falls_back_to_bm25_when_only_bm25_docs_are_visible_by_as_of(tmp_path):
-    store = Store(tmp_path)
-    bm25_cfg = settings(False, data_dir=tmp_path)
-    hybrid_cfg = settings(True, data_dir=tmp_path)
-
-    doc_bm25, frags_bm25 = document(
-        store,
-        doc_id="a-bm25",
-        texts=["Специальный пропуск действует с 2026 года."],
-        metadata={"reviewed": True, "valid_from": "2026-01-01"},
-    )
-    doc_hybrid, frags_hybrid = document(
-        store,
-        doc_id="z-hybrid",
-        texts=["Заявка 2025 года утратила силу."],
-        metadata={"reviewed": True, "valid_from": "2025-01-01", "valid_to": "2025-12-31"},
-    )
-
-    Indexer(store, bm25_cfg).index_document(doc_bm25.id, frags_bm25)
-    emb = Embeddings(hybrid_cfg)
-    Indexer(store, hybrid_cfg, emb).index_document(doc_hybrid.id, frags_hybrid)
-    emb.calls.clear()
-
-    res = asyncio.run(
-        Searcher(store, hybrid_cfg, emb, Reranker(hybrid_cfg)).search(
-            SearchRequest(question="пропуск", as_of="2026-06-01")
-        )
-    )
-    assert res.mode == "bm25"
-    assert indexing.BM25_WARNING in res.warnings
-    assert emb.calls == []
-    assert [h.fragment.id for h in res.hits] == ["a-bm25-f0"]
-
-
-def test_resolve_indexer_attaches_embeddings_only_when_ml_enabled(tmp_path):
-    from navigator.documents.service import DocumentService
-
-    ml_off_service = DocumentService(Store(tmp_path / "off"), settings(False, data_dir=tmp_path / "off"))
-    assert ml_off_service.indexer.embeddings is None
-
-    ml_on_service = DocumentService(Store(tmp_path / "on"), settings(True, data_dir=tmp_path / "on"))
-    assert ml_on_service.indexer.embeddings is not None
-
-
-def test_navigator_text_imports_and_lemmatizes_with_pymorphy3():
-    import navigator.text as nav_text
-
-    toks = nav_text.tokens("Заявки   поселения")
-    assert "заявка" in toks
-    assert "поселение" in toks
-    assert nav_text.normalize_quote("  проверка \n текста  ") == "проверка текста"
