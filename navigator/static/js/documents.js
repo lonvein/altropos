@@ -301,7 +301,7 @@
         fillDetail(fragment, "reviewed", "подтверждена администратором");
       } else if (status === "ready") {
         fillDetail(fragment, "reviewed", "пройдена");
-      } else if (metadata.reviewed === false) {
+      } else if (metadata.reviewed === false && (status === "needs_review" || status === "failed" || warnings.length > 0)) {
         fillDetail(fragment, "reviewed", "не подтверждена");
       }
       fillDetail(fragment, "relations", renderRelationsSummary(metadata.relations));

@@ -139,7 +139,12 @@
     function renderPreview(doc, originalInfo) {
       pageCount = Math.max(1, Number(originalInfo?.page_count) || 1);
       currentPage = Math.max(1, Math.min(pageCount, currentPage));
-      if (doc.media_type === "pdf") {
+      const canRenderPages = Boolean(
+        (originalInfo && originalInfo.available && originalInfo.supports_bbox)
+        || doc.media_type === "pdf"
+        || doc.media_type === "docx",
+      );
+      if (canRenderPages) {
         A.show(pageControls, true);
         A.setText(pageLabel, `Стр. ${currentPage} / ${pageCount}`);
         prevPageBtn.disabled = currentPage <= 1;
@@ -153,7 +158,7 @@
         previewImg.removeAttribute("src");
         A.setText(
           previewNote,
-          `Постраничное изображение доступно только для PDF (текущий формат: ${String(doc.media_type || "").toUpperCase()}). Вы можете скачать оригинал или отредактировать извлечённые блоки справа.`,
+          `Постраничное изображение доступно для PDF и DOCX (текущий формат: ${String(doc.media_type || "").toUpperCase()}). Вы можете скачать оригинал или отредактировать извлечённые блоки справа.`,
         );
         A.show(previewNote, true);
       }
@@ -223,10 +228,12 @@
       A.setText(versionNode, doc.version ? `Версия: ${doc.version}` : "");
       if (doc.metadata && doc.metadata.reviewed === true) {
         A.setText(approvedNode, "Подтверждён оператором");
+      } else if (doc.status === "ready") {
+        A.setText(approvedNode, "Опубликован");
       } else if (doc.metadata && doc.metadata.reviewed === false) {
         A.setText(approvedNode, "Требует подтверждения");
       } else {
-        A.setText(approvedNode, doc.status === "ready" ? "Опубликован" : "Ожидает решения");
+        A.setText(approvedNode, "Ожидает решения");
       }
 
       const warnings = Array.isArray(detail.warnings) ? detail.warnings : [];

@@ -305,19 +305,45 @@ def to_fragments(document_id: str, document_version: str, drafts: list[FragmentD
 
 
 _ALWAYS_NOISY_WARNING_SUBSTRINGS = (
-    "уточнён согласованным повторным OCR области",
-    "уточнён согласованным OCR области без ограничения алфавита",
-    "распознаны OCR; текст может содержать ошибки",
-    "Визуально подтверждён оператором по оригиналу, текст не менялся",
+    "уточнен согласованным повторным ocr",
+    "уточнены согласованным повторным ocr",
+    "уточнен согласованным ocr",
+    "уточнены согласованным ocr",
+    "страницы распознаны ocr",
+    "распознаны ocr",
+    "текст может содержать ошибки",
+    "визуально подтвержден оператором по оригиналу",
+    "визуально подтверждены оператором по оригиналу",
+    "визуально подтвержден оператором",
     "технически сверены с оригиналом",
-    "без сохранённого значения",
+    "без сохраненного значения",
     "значения не пересчитывались",
 )
 _READY_ONLY_SUPPRESSED_SUBSTRINGS = (
-    "Значительная часть страницы представлена изображением; требуется OCR всей страницы",
-    "не подтверждён повторным OCR области",
+    "значительная часть страницы представлена изображением; требуется ocr всей страницы",
+    "требуется ocr всей страницы",
+    "не подтвержден повторным ocr области",
     "ручные надстрочные маркеры; требуется проверка",
 )
+
+
+def _norm_warning_key(text: str) -> str:
+    return text.casefold().replace("ё", "е")
+
+
+def is_actionable_warning(raw: str) -> bool:
+    """Return True when a warning describes an unresolved issue requiring review."""
+    if not isinstance(raw, str):
+        return False
+    text = raw.strip()
+    if not text:
+        return False
+    low = _norm_warning_key(text)
+    if any(marker in low for marker in _ALWAYS_NOISY_WARNING_SUBSTRINGS):
+        return False
+    if any(marker in low for marker in _READY_ONLY_SUPPRESSED_SUBSTRINGS):
+        return True
+    return True
 
 
 def filter_user_warnings(
@@ -335,9 +361,10 @@ def filter_user_warnings(
         text = raw.strip()
         if not text:
             continue
-        if any(marker in text for marker in _ALWAYS_NOISY_WARNING_SUBSTRINGS):
+        low = _norm_warning_key(text)
+        if any(marker in low for marker in _ALWAYS_NOISY_WARNING_SUBSTRINGS):
             continue
-        if is_ready and any(marker in text for marker in _READY_ONLY_SUPPRESSED_SUBSTRINGS):
+        if is_ready and any(marker in low for marker in _READY_ONLY_SUPPRESSED_SUBSTRINGS):
             continue
         if text not in filtered:
             filtered.append(text)

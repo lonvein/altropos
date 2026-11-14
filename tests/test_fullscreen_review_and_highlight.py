@@ -587,16 +587,31 @@ def test_honest_no_highlight_when_coordinates_unavailable(tmp_path, monkeypatch)
     assert res_pdf["boxes"] == []
     assert "3" in (res_pdf["notice"] or "")
 
-    docx_bytes = _build_simple_docx([
-        "Заголовок регламента",
-        "Пункт 1.1. Заявка подаётся за три рабочих дня до мероприятия.",
-    ])
+    frag_docx_missing = Fragment(
+        id="doc-noc-d0000",
+        document_id="doc-noc-d",
+        document_version="v1",
+        ordinal=0,
+        text="Фрагмент DOCX без исходного файла.",
+        locator={"kind": "docx", "block": 0},
+    )
+    res_docx_none = resolve_fragment_highlight(
+        None,
+        "docx",
+        frag_docx_missing,
+        blocks=[{"index": 0, "kind": "paragraph", "text": "Фрагмент DOCX без исходного файла."}],
+        quote="Фрагмент DOCX без исходного файла.",
+    )
+    assert res_docx_none["exact"] is False
+    assert res_docx_none["boxes"] == []
+
+    # HTML documents do not have paginated PDF/DOCX bbox coordinates.
     settings = Settings(_env_file=None, data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
     app = _make_app(monkeypatch, settings, synthetic=False)
     with TestClient(app) as client:
         up = client.post(
             "/api/documents",
-            files={"file": ("rule.docx", docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+            files={"file": ("rule.html", "<p>Пункт 1.1. Тестовый HTML документ без координат.</p>".encode("utf-8"), "text/html")},
         )
         assert up.status_code == 200
         doc_id = up.json()["document_id"]
@@ -611,3 +626,111 @@ def test_honest_no_highlight_when_coordinates_unavailable(tmp_path, monkeypatch)
         assert data["exact"] is False
         assert data["boxes"] == []
         assert data["notice"]
+
+
+def test_docx_original_page_render_and_multiline_highlight(tmp_path, monkeypatch):
+    from docx import Document as DocxDocument
+
+    d = DocxDocument()
+    d.add_heading("Об утверждении порядка присвоения номера ФЛС", level=1)
+    long_clause = (
+        "Пункт 1.1. Код финансового обеспечения (КФО) определяется автоматически в соответствии "
+        "с установленным классификатором источников финансирования проекта и подлежит обязательному "
+        "согласованию с планово-финансовым управлением при открытии нового лицевого счёта."
+    )
+    for i in range(55):
+        d.add_paragraph(
+            f"Предварительный пункт {i + 1}: общие положения порядка учёта и документооборота подразделений института."
+        )
+    d.add_paragraph(long_clause)
+    tbl = d.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "Разряд"
+    tbl.rows[0].cells[1].text = "Назначение кода"
+    tbl.rows[1].cells[0].text = "ФЛС-01"
+    tbl.rows[1].cells[1].text = "Целевые научные гранты и субсидии"
+    buf = io.BytesIO()
+    d.save(buf)
+    docx_bytes = buf.getvalue()
+
+    settings = Settings(_env_file=None, data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
+    app = _make_app(monkeypatch, settings, synthetic=False)
+    with TestClient(app) as client:
+        up = client.post(
+            "/api/documents",
+            files={
+                "file": (
+                    "fls-order.docx",
+                    docx_bytes,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        assert up.status_code == 200
+        doc_id = up.json()["document_id"]
+        svc = app.state.document_service
+        _wait_processed(client, svc, doc_id)
+
+        orig_resp = client.get(f"/api/documents/{doc_id}/original")
+        assert orig_resp.status_code == 200
+        assert orig_resp.content == docx_bytes
+
+        info_resp = client.get(f"/api/documents/{doc_id}/original-info")
+        assert info_resp.status_code == 200
+        info = info_resp.json()
+        assert info["media_type"] == "docx"
+        assert info["supports_bbox"] is True
+        assert info["page_count"] >= 2
+
+        for p in range(1, info["page_count"] + 1):
+            png = client.get(f"/api/documents/{doc_id}/original-page/{p}")
+            assert png.status_code == 200
+            assert png.content[:8] == b"\x89PNG\r\n\x1a\n"
+            with Image.open(io.BytesIO(png.content)) as im:
+                assert im.width > 300 and im.height > 400
+                ext = im.convert("L").getextrema()
+                assert ext[0] < ext[1]
+
+        frags = svc.store.rows("SELECT id, text FROM fragments WHERE document_id=? ORDER BY ordinal", (doc_id,))
+        target_frag = next(f for f in frags if "классификатором источников финансирования" in f["text"])
+
+        hl_resp = client.get(f"/api/sources/{target_frag['id']}/highlight", params={"quote": long_clause})
+        assert hl_resp.status_code == 200
+        hl = hl_resp.json()
+        assert hl["media_type"] == "docx"
+        assert hl["exact"] is True
+        assert hl["page_count"] == info["page_count"]
+        assert 1 <= hl["page"] <= info["page_count"]
+        assert len(hl["boxes"]) >= 2
+        assert hl["boxes"][0]["norm"]["top"] < hl["boxes"][1]["norm"]["top"]
+        for box in hl["boxes"]:
+            norm = box["norm"]
+            assert 0.0 <= norm["left"] < 1.0
+            assert 0.0 <= norm["top"] < 1.0
+            assert 0.0 < norm["width"] <= 1.0 - norm["left"] + 1e-6
+            assert 0.0 < norm["height"] <= 1.0 - norm["top"] + 1e-6
+
+        # Recognized text presentation highlights matching block inside article.source-document.
+        view_resp = client.get(f"/api/sources/{target_frag['id']}")
+        assert view_resp.status_code == 200
+        assert "source-block--highlighted" in view_resp.text
+        assert "source-inline-mark" in view_resp.text
+
+
+def test_fullscreen_viewer_proportions_and_recognized_text_layout(tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
+    app = _make_app(monkeypatch, settings, synthetic=True)
+    with TestClient(app) as client:
+        app_css = client.get("/static/css/app.css").text
+        assert "width: 98vw" in app_css
+        assert "height: 96vh" in app_css
+        assert "min-height: 80vh" in app_css
+        assert ".source-viewport--presentation" in app_css
+
+        src_css = client.get("/static/css/source.css").text
+        assert "max-width: min(1240px, 100%)" in src_css
+        assert ".source-block--highlighted" in src_css
+
+        viewer_js = client.get("/static/js/source-viewer.js").text
+        assert "supportsOriginalPages" in viewer_js
+        assert 'state.mediaType === "pdf" || state.mediaType === "docx"' in viewer_js
+        assert "source-viewport--presentation" in viewer_js

@@ -101,9 +101,17 @@
       }
     }
 
+    function supportsOriginalPages() {
+      if (state.originalInfo && typeof state.originalInfo.supports_bbox === "boolean") {
+        return state.originalInfo.supports_bbox;
+      }
+      return state.mediaType === "pdf" || state.mediaType === "docx";
+    }
+
     function updatePageControls() {
-      const canPage = state.mode === "original" && state.mediaType === "pdf" && state.pageCount >= 1;
-      A.show(sourcePageControls, canPage || (state.mediaType === "pdf" && state.pageCount > 1));
+      const hasPages = supportsOriginalPages();
+      const canPage = state.mode === "original" && hasPages && state.pageCount >= 1;
+      A.show(sourcePageControls, canPage || (hasPages && state.pageCount > 1));
       if (sourcePageInput) {
         sourcePageInput.max = String(Math.max(1, state.pageCount));
         sourcePageInput.value = String(state.currentPage);
@@ -142,6 +150,9 @@
     }
 
     function applyCanvasSize() {
+      if (sourceViewport) {
+        sourceViewport.classList.toggle("source-viewport--presentation", state.mode === "presentation");
+      }
       if (state.mode === "original") {
         if (!sourceOriginalImage || sourceOriginalImage.hidden) {
           return;
@@ -154,13 +165,15 @@
         }
       } else if (sourceFrame) {
         sourceFrame.style.transformOrigin = "top left";
-        if (state.fitWidth) {
+        if (state.fitWidth || Math.abs(state.zoom - 1.0) < 0.01) {
           sourceFrame.style.transform = "";
           sourceFrame.style.width = "100%";
+          sourceFrame.style.height = "100%";
         } else {
           const pct = 100 / Math.max(0.4, state.zoom);
           sourceFrame.style.transform = `scale(${state.zoom})`;
           sourceFrame.style.width = `${pct}%`;
+          sourceFrame.style.height = `${pct}%`;
         }
       }
     }
@@ -232,6 +245,9 @@
       state.mode = "presentation";
       setModeButtons();
       clearNotice();
+      if (sourceViewport) {
+        sourceViewport.classList.add("source-viewport--presentation");
+      }
       A.show(sourceOriginalStage, false);
       clearHighlights();
 
@@ -269,17 +285,17 @@
       state.currentPage = clamped;
       updatePageControls();
 
-      if (state.mediaType !== "pdf") {
+      if (!supportsOriginalPages()) {
         A.show(sourceOriginalImage, false);
         clearHighlights();
-        const nonPdfMsg =
+        const nonPageMsg =
           (state.highlightData && state.highlightData.notice) ||
-          "Точное координатное выделение поверх страниц поддерживается только для PDF-оригиналов. Для проверки этого файла вы можете скачать оригинал или открыть распознанный текст.";
-        showNotice(nonPdfMsg);
+          "Точное координатное выделение поверх страниц поддерживается только для PDF и DOCX оригиналов. Для проверки этого файла вы можете скачать оригинал или открыть распознанный текст.";
+        showNotice(nonPageMsg);
         if (sourceOriginalEmpty) {
           A.setText(
             sourceOriginalEmpty,
-            "Формат исходного файла (не PDF) нельзя отобразить постраничным изображением в браузере. Используйте кнопку «Скачать оригинал» или вкладку «Распознанный текст».",
+            "Постраничный предпросмотр недоступен для этого формата. Используйте кнопку «Скачать оригинал» или вкладку «Распознанный текст».",
           );
           A.show(sourceOriginalEmpty, true);
         }
@@ -317,30 +333,62 @@
       }
       state.mode = "original";
       setModeButtons();
+      if (sourceViewport) {
+        sourceViewport.classList.remove("source-viewport--presentation");
+      }
       A.show(sourceFrameWrap, false);
       A.show(sourceOriginalStage, true);
       clearError();
 
       const token = state.openToken;
+      const pending = [];
       if (!state.originalInfo) {
-        try {
-          const info = await A.apiFetch(
-            `/api/documents/${encodeURIComponent(state.documentId)}/original-info`,
+        pending.push(
+          A.apiFetch(`/api/documents/${encodeURIComponent(state.documentId)}/original-info`, { method: "GET" })
+            .then((info) => {
+              if (token !== state.openToken || !info) {
+                return;
+              }
+              state.originalInfo = info;
+              if (info.media_type) {
+                state.mediaType = info.media_type;
+              }
+              if (Number(info.page_count) > 0) {
+                state.pageCount = Math.max(state.pageCount, Number(info.page_count));
+              }
+            })
+            .catch(() => null),
+        );
+      }
+      if (state.fragmentId && !state.highlightData) {
+        pending.push(
+          A.apiFetch(
+            `/api/sources/${encodeURIComponent(state.fragmentId)}/highlight?quote=${encodeURIComponent(state.quote)}`,
             { method: "GET" },
-          );
-          if (token !== state.openToken) {
-            return;
-          }
-          state.originalInfo = info;
-          if (info && info.media_type) {
-            state.mediaType = info.media_type;
-          }
-          if (info && Number(info.page_count) > 0) {
-            state.pageCount = Math.max(state.pageCount, Number(info.page_count));
-          }
-        } catch {
-          // Fallback to metadata from highlight/locator.
-        }
+          )
+            .then((hl) => {
+              if (token !== state.openToken || !hl) {
+                return;
+              }
+              state.highlightData = hl;
+              if (hl.media_type) {
+                state.mediaType = hl.media_type;
+              }
+              if (Number(hl.page) > 0) {
+                state.targetPage = Number(hl.page);
+              }
+              if (Number(hl.page_count) > 0) {
+                state.pageCount = Math.max(state.pageCount, Number(hl.page_count));
+              }
+            })
+            .catch(() => null),
+        );
+      }
+      if (pending.length > 0) {
+        await Promise.all(pending);
+      }
+      if (token !== state.openToken) {
+        return;
       }
 
       if (jumpToTarget && state.targetPage > 0) {
@@ -349,7 +397,7 @@
       if (sourceFooterHint) {
         A.setText(
           sourceFooterHint,
-          state.mediaType === "pdf"
+          supportsOriginalPages()
             ? "Исходная страница документа. Колёсико и кнопки масштаба изменяют размер без смещения подсветки."
             : "",
         );
@@ -381,7 +429,8 @@
       A.setText(sourceTitle, source?.title || "Источник");
       A.setText(sourceLocator, A.formatLocator(source?.locator) || "Адрес фрагмента не указан");
       if (sourceQuote) {
-        A.setText(sourceQuote, quote || "Дословная цитата не передана сервером.");
+        A.setText(sourceQuote, quote || "");
+        sourceQuote.title = quote || "";
         A.show(sourceQuote, Boolean(quote));
       }
       clearError();
@@ -420,39 +469,61 @@
         sourceFrame.removeAttribute("data-loaded-src");
       }
 
-      showPresentationMode();
       A.openDialog(sourceDialog);
 
+      const tasks = [];
+      if (state.documentId) {
+        tasks.push(
+          A.apiFetch(`/api/documents/${encodeURIComponent(state.documentId)}/original-info`, { method: "GET" })
+            .then((info) => {
+              if (token !== state.openToken || !info) {
+                return;
+              }
+              state.originalInfo = info;
+              if (info.media_type) {
+                state.mediaType = info.media_type;
+              }
+              if (Number(info.page_count) > 0) {
+                state.pageCount = Math.max(state.pageCount, Number(info.page_count));
+              }
+            })
+            .catch(() => null),
+        );
+      }
       if (state.fragmentId) {
-        try {
-          const hl = await A.apiFetch(
+        tasks.push(
+          A.apiFetch(
             `/api/sources/${encodeURIComponent(state.fragmentId)}/highlight?quote=${encodeURIComponent(state.quote)}`,
             { method: "GET" },
-          );
-          if (token !== state.openToken) {
-            return;
-          }
-          state.highlightData = hl;
-          if (hl && hl.media_type) {
-            state.mediaType = hl.media_type;
-          }
-          if (hl && Number(hl.page) > 0) {
-            state.targetPage = Number(hl.page);
-          }
-          if (hl && Number(hl.page_count) > 0) {
-            state.pageCount = Math.max(1, Number(hl.page_count));
-          }
-          updatePageControls();
-          if (state.mode === "original") {
-            if (state.currentPage === state.targetPage && sourceOriginalImage?.complete) {
-              renderHighlightBoxes({ scrollIntoView: true });
-            } else {
-              loadOriginalPage(state.targetPage, { scrollToHighlight: true });
-            }
-          }
-        } catch {
-          // Non-fatal: highlight notice handles unavailability when user switches to original.
-        }
+          )
+            .then((hl) => {
+              if (token !== state.openToken || !hl) {
+                return;
+              }
+              state.highlightData = hl;
+              if (hl.media_type) {
+                state.mediaType = hl.media_type;
+              }
+              if (Number(hl.page) > 0) {
+                state.targetPage = Number(hl.page);
+              }
+              if (Number(hl.page_count) > 0) {
+                state.pageCount = Math.max(state.pageCount, Number(hl.page_count));
+              }
+            })
+            .catch(() => null),
+        );
+      }
+
+      await Promise.all(tasks);
+      if (token !== state.openToken) {
+        return;
+      }
+
+      if (state.documentId && supportsOriginalPages()) {
+        await showOriginalMode({ jumpToTarget: true });
+      } else {
+        showPresentationMode();
       }
     }
 

@@ -239,12 +239,16 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
             return _error("not_found", "Документ не найден.", 404)
         doc_rec = svc.get_document(document_id) or {}
         media_type = doc_rec.get("media_type") or "pdf"
-        if media_type != "pdf":
-            return _error("not_found", "Постраничное изображение доступно только для PDF-оригинала.", 404)
+        if media_type not in {"pdf", "docx"}:
+            return _error("not_found", "Постраничное изображение доступно только для PDF и DOCX.", 404)
         try:
             path = svc.storage.get_original_path(row["path"])
             clamped_scale = max(0.5, min(3.5, float(scale)))
-            png_bytes = render_original_pdf_page(path, page_number, scale=clamped_scale)
+            if media_type == "docx":
+                from navigator.documents.highlighting import render_original_docx_page
+                png_bytes = render_original_docx_page(path, page_number, scale=clamped_scale)
+            else:
+                png_bytes = render_original_pdf_page(path, page_number, scale=clamped_scale)
         except ValueError as exc:
             return _error("not_found", str(exc) or "Страница не найдена.", 404)
         except (OSError, FileNotFoundError):

@@ -435,3 +435,143 @@ def test_rag_kfo_definition_complete_without_spurious_warnings(tmp_path):
     assert proc_resp.status == "partial"
     assert proc_resp.verification.complete is False
     assert any("полнота процедуры" in w for w in proc_resp.warnings)
+
+
+def test_ocr_and_visual_confirmation_warnings_do_not_cause_failed_or_unconfirmed_status(tmp_path):
+    import json
+    from navigator.config import Settings
+    from navigator.corpus import create_manifest
+    from navigator.documents.service import DocumentService
+    from navigator.ingestion.common import filter_user_warnings, is_actionable_warning
+
+    # 1. Verify warning filtering handles page-ranged OCR notices and lowercase operator confirmations.
+    noisy = [
+        "Страницы распознаны OCR: 1–5; текст может содержать ошибки",
+        "Страницы распознаны OCR: 2–3; текст может содержать ошибки",
+        "Страница 3: номер 3.7 визуально подтверждён оператором по оригиналу, текст не менялся",
+    ]
+    assert filter_user_warnings(noisy, status="ready") == []
+    assert filter_user_warnings(noisy, status="needs_review", needs_review=True) == []
+    assert not any(is_actionable_warning(w) for w in noisy)
+
+    real_problem = "Страницы без текста (OCR недоступен): 4; требуется проверка"
+    assert filter_user_warnings(noisy + [real_problem], status="needs_review", needs_review=True) == [real_problem]
+    assert is_actionable_warning(real_problem)
+
+    # 2. Verify startup status healing on stale DB records and safe reprocessing on initial-corpus docs.
+    store = Store(tmp_path)
+    cfg = Settings(_env_file=None, data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
+    indexer = Indexer(store, cfg)
+
+    doc_reg = Document(
+        id="doc-reglament",
+        version="v1",
+        name="reglament.pdf",
+        title="Регламент",
+        sha256="d" * 64,
+        original_path="originals/reglament.pdf",
+        media_type="pdf",
+        status="queued",
+        metadata=MetadataPatch(title="Регламент", reviewed=True),
+        warnings=["Страницы распознаны OCR: 1–5; текст может содержать ошибки"],
+    )
+    f_reg = Fragment(
+        id="doc-reglament-f0000",
+        document_id=doc_reg.id,
+        document_version="v1",
+        ordinal=0,
+        text="Регламентный текст документа.",
+        locator={"kind": "pdf", "page": 1},
+    )
+    store.register_document(doc_reg)
+    indexer.index_document(doc_reg.id, [f_reg])
+    # Simulate historical failure leaving failed status + reviewed=True + active_publication.
+    store.execute(
+        "UPDATE documents SET status='failed', payload=json_set(payload, '$.status', 'failed') WHERE id=?",
+        (doc_reg.id,),
+    )
+
+    doc_emp = Document(
+        id="doc-settlement",
+        version="v1",
+        name="settlement.pdf",
+        title="Регламент поселения сотрудников",
+        sha256="e" * 64,
+        original_path="originals/settlement.pdf",
+        media_type="pdf",
+        status="queued",
+        metadata=MetadataPatch(title="Регламент поселения сотрудников", reviewed=False),
+        warnings=[
+            "Страницы распознаны OCR: 2–3; текст может содержать ошибки",
+            "Страница 3: номер 3.7 визуально подтверждён оператором по оригиналу, текст не менялся",
+        ],
+    )
+    f_emp = Fragment(
+        id="doc-settlement-f0000",
+        document_id=doc_emp.id,
+        document_version="v1",
+        ordinal=0,
+        text="Пункт 3.7. Условия поселения сотрудников.",
+        locator={"kind": "pdf", "page": 3},
+    )
+    store.register_document(doc_emp)
+    indexer.index_document(doc_emp.id, [f_emp])
+    store.execute(
+        "UPDATE documents SET status='failed', payload=json_set(payload, '$.status', 'failed') WHERE id=?",
+        (doc_emp.id,),
+    )
+
+    healed_service = DocumentService(store, cfg, indexer=indexer)
+    rec1 = healed_service.get_document(doc_reg.id)
+    assert rec1["status"] == "ready"
+    assert rec1["warnings"] == []
+    assert rec1["metadata"]["reviewed"] is True
+
+    rec2 = healed_service.get_document(doc_emp.id)
+    assert rec2["status"] == "ready"
+    assert rec2["warnings"] == []
+    assert rec2["metadata"]["reviewed"] is True
+
+    # 3. Verify reprocessing / reocr on an already-published or initial-corpus doc never raises version/initial error.
+    sources = tmp_path / "src"
+    sources.mkdir()
+    sample_html = "<html><body><p>Пункт 1. Обязательное положение регламента.</p></body></html>".encode("utf-8")
+    (sources / "initial.html").write_bytes(sample_html)
+    manifest = tmp_path / "manifest.json"
+    create_manifest(sources, [], manifest)
+
+    orig_rel = "originals/init_doc.html"
+    (tmp_path / orig_rel).write_bytes(sample_html)
+    from navigator.ingestion.common import sha256_bytes
+
+    init_sha = sha256_bytes(sample_html)
+    doc_init = Document(
+        id="doc-init-corpus",
+        version="v1",
+        name="initial.html",
+        title="Начальный регламент",
+        sha256=init_sha,
+        original_path=orig_rel,
+        media_type="html",
+        status="queued",
+        metadata=MetadataPatch(title="Начальный регламент", reviewed=False),
+        warnings=[],
+    )
+    f_init = Fragment(
+        id="doc-init-corpus-f0000",
+        document_id=doc_init.id,
+        document_version="v1",
+        ordinal=0,
+        text="Пункт 1. Обязательное положение регламента.",
+        locator={"kind": "html", "block": 0},
+    )
+    store.register_document(doc_init)
+    indexer.index_document(doc_init.id, [f_init])
+
+    cfg_with_manifest = cfg.model_copy(update={"corpus_manifest": manifest})
+    svc_manifest = DocumentService(store, cfg_with_manifest, indexer=indexer)
+    svc_manifest.reocr_document(doc_init.id, reviewer="Администратор")
+    assert svc_manifest.process_next_job()
+    after_reocr = svc_manifest.get_document(doc_init.id)
+    assert after_reocr["status"] == "ready"
+    assert after_reocr["version"] == "v2"
