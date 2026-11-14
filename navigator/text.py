@@ -34,3 +34,4 @@ def estimate_tokens(text):
 
 def normalize_quote(text):
     return re.sub(r"\s+", " ", text).strip()
+main
