@@ -563,10 +563,10 @@ class DocumentService:
         """Startup never infers publication or legal review from cached state.
 
         Failed/pending documents require an explicit operator decision. Metadata
-        and warning prose are not an approval record for recognized content.
+        and warning prose are not an approval record for recognized content,
+        while already-extracted PDFs missing entire image pages (e.g. Page 1)
+        can be re-parsed without altering approval decisions.
         """
-        return None
-
         for row in self.store.rows(
             "SELECT * FROM documents WHERE status IN ('ready', 'needs_review')"
         ):
