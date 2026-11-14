@@ -96,6 +96,7 @@ class AuthConfig:
     demo_enabled: bool = True
     demo_username: str = "admin"
     demo_password: str = "qwerty"
+    demo_operator_access: bool = False
     admin_username: str = ""
     admin_password_hash: str = ""
     user_ttl: int = 12 * 3600
@@ -114,6 +115,7 @@ class AuthConfig:
         config = cls(
             required=required,
             demo_enabled=bool(getattr(settings, "demo_login_enabled", True)),
+            demo_operator_access=bool(getattr(settings, "demo_operator_access", False)),
             demo_username=getattr(settings, "demo_username", "admin") or "admin",
             demo_password=getattr(settings, "demo_password", "qwerty") or "qwerty",
             admin_username=(getattr(settings, "admin_username", "") or "").strip(),
@@ -136,7 +138,7 @@ class AuthConfig:
                 log.error("ADMIN_PASSWORD_HASH must be a pbkdf2_sha256 hash "
                           "(scripts/deploy/make_admin_hash.py); web administrator disabled")
                 config.admin_username = config.admin_password_hash = ""
-        else:
+        elif not config.demo_operator_access:
             log.warning("No ADMIN_USERNAME/ADMIN_PASSWORD_HASH: OCR review is unavailable through the web")
         configured = (getattr(settings, "session_secret", "") or "").strip()
         if configured and len(configured) < 32:
@@ -206,11 +208,15 @@ def read_token(config: AuthConfig, token: str | None, *, now: float | None = Non
     if data.get("n") in config.revoked:
         return None
     # The admin role is only honoured while the account still exists in the configuration.
-    if data["r"] == ROLE_ADMIN and not (config.admin_enabled and data.get("u") == config.admin_username):
+    demo_operator = (config.demo_enabled and config.demo_operator_access
+                     and str(data.get('u', '')).casefold() == config.demo_username.casefold())
+    if data["r"] == ROLE_ADMIN and not (demo_operator or config.admin_enabled and data.get("u") == config.admin_username):
         return None
     if data["r"] == ROLE_USER and not (config.demo_enabled and str(data.get("u", "")).lower()
                                        == config.demo_username.lower()):
         return None
+    if demo_operator:
+        data['r'] = ROLE_ADMIN
     return data
 
 
@@ -257,7 +263,7 @@ def authenticate(config: AuthConfig, username: str, password: str) -> tuple[str,
     if admin_ok:
         return config.admin_username, ROLE_ADMIN
     if demo_ok:
-        return config.demo_username, ROLE_USER
+        return config.demo_username, ROLE_ADMIN if config.demo_operator_access else ROLE_USER
     return None
 
 

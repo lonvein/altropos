@@ -92,7 +92,7 @@ class ReaderGateway:
         # Multipart framing adds a little to the file itself.
         self.max_upload = int(max_upload_mb) * 1024 * 1024 + 1024 * 1024
         if admin_routes is None:
-            admin_routes = bool(os.environ.get("ADMIN_USERNAME") and os.environ.get("ADMIN_PASSWORD_HASH"))
+            admin_routes = bool(os.environ.get("ADMIN_USERNAME") and os.environ.get("ADMIN_PASSWORD_HASH")) or os.environ.get('DEMO_OPERATOR_ACCESS', 'false').lower() == 'true'
         self.admin_routes = admin_routes
         self.routes = [(m, re.compile(p), limit, kind) for m, p, limit, kind in _routes(self.max_upload)]
 

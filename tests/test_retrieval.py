@@ -365,7 +365,7 @@ def test_rrf_duplicates_and_limits(tmp_path):
     doc, fragments = document(store, texts=[f"ИСКУССТВЕННЫЙ ПРИМЕР. заявка {i}" for i in range(75)])
     emb, rerank = Embeddings(config), Reranker(config)
     Indexer(store, config, emb).index_document(doc.id, fragments)
-    assert [len(call.texts) for call in emb.calls] == [64, 11]
+    assert [len(call.texts) for call in emb.calls] == [8] * 9 + [3]
     result = asyncio.run(Searcher(store, config, emb, rerank).search(
         SearchRequest(question="заявка", limit=8), Subqueries(queries=["заявка 74", "заявка 73", "заявка 72"])))
     assert len(result.hits) == 4

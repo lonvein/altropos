@@ -42,8 +42,10 @@ async def embed(client: EmbeddingsClient, texts: list[str], purpose: str, settin
     import numpy as np
 
     vectors = []
-    for start in range(0, len(texts), 64):
-        batch = texts[start:start + 64]
+    # Bound CPU inference per request as well as memory. A 64-fragment batch
+    # can exceed the service timeout even though smaller batches are healthy.
+    for start in range(0, len(texts), 8):
+        batch = texts[start:start + 8]
         try:
             response = EmbeddingResponse.model_validate(await asyncio.wait_for(
                 client.embed(EmbeddingRequest(texts=batch, purpose=purpose)), settings.request_timeout))
