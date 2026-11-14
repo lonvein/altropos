@@ -887,6 +887,9 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
                 line_boxes.append({
                     "text": " ".join(w["text"] for w in words),
                     "bbox": _inverse_box(lbox, steps, original_size, page_size),
+                    # Word boxes let a quote that covers part of a line be highlighted exactly.
+                    "words": [{"text": w["text"], "bbox": _inverse_box(w["box"], steps, original_size, page_size)}
+                              for w in sorted(words, key=lambda w: w["box"][0])],
                 })
             markers = _reference_markers(par["words"])
             for marker in markers:

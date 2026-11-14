@@ -123,8 +123,10 @@ def test_pdf_rotation_is_already_in_rendered_page(tmp_path, rotation, crop):
                                 source='ocr', rotation=0, warnings=[], needs_review=False)
     hook.supports_page_size = True
     parsed = parse_pdf(path, ocr=hook)
-    expected = (842., 595.) if rotation in (90, 270) else (595., 842.)
-    assert sizes[0][1] == expected
+    # OCR sees exactly what the viewer shows: CropBox with /Rotate applied.
+    base = (500., 750.) if crop else (595., 842.)
+    expected = base[::-1] if rotation in (90, 270) else base
+    assert sizes[0][1] == pytest.approx(expected, abs=.01)
     assert abs(sizes[0][0][0]/sizes[0][0][1] - expected[0]/expected[1]) < .002
     assert parsed.diagnostics[0]['pdf_rotation'] == rotation
 

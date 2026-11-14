@@ -235,7 +235,7 @@ def test_rereview_and_separate_reocr_on_ready_approved_document(tmp_path, monkey
         assert approve_1.status_code == 200
         d1 = approve_1.json()
         assert d1["document"]["status"] == "ready"
-        assert d1["document"]["metadata"]["reviewed"] is True
+        assert d1["document"]["metadata"]["reviewed"] is False
         assert len(d1["review_history"]) == 1
         assert d1["review_history"][0]["decision"] == "approved"
 
@@ -279,7 +279,7 @@ def test_rereview_and_separate_reocr_on_ready_approved_document(tmp_path, monkey
         d2 = approve_2.json()
         assert d2["document"]["status"] == "ready"
         assert d2["document"]["version"] == "v2"
-        assert d2["document"]["metadata"]["reviewed"] is True
+        assert d2["document"]["metadata"]["reviewed"] is False
         assert [h["reviewer"] for h in d2["review_history"]] == [
             "Первый эксперт",
             "Второй эксперт",

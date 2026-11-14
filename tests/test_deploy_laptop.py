@@ -1,4 +1,4 @@
-"""Boundary tests: public readers cannot write or cross-origin ask."""
+"""Public edge: explicit route allowlist, bounded bodies, same-origin writes, admin routes closed."""
 import asyncio
 import pytest
 from scripts.deploy.gateway import ReaderGateway
@@ -24,26 +24,64 @@ def request(path, method="GET", headers=(), body=b"{}"):
     return asyncio.run(run())
 
 
+ORIGIN = [(b"origin", b"https://aitropos.ru")]
+
+
 @pytest.mark.parametrize("path,method", [
     ("/review", "GET"), ("/review-files/private.html", "GET"),
-    ("/api/documents", "POST"),
-    ("/api/documents/id/metadata", "PATCH"),
     ("/api/documents/id/review", "GET"), ("/api/documents/id/review", "POST"),
-    ("/api/documents/id/reocr", "POST"), ("/api/documents/id/retry", "POST"),
-    ("/api/import-url", "POST"),
-    ("/api/jobs", "GET"), ("/api/jobs/job-1", "GET"),
-    ("/openapi.json", "GET"),
+    ("/api/documents/id/reocr", "POST"),
+])
+def test_admin_routes_closed_at_the_edge_unless_admin_account_is_configured(path, method):
+    # Even with a same-origin request the edge keeps OCR review closed by default.
+    assert request(path, method, ORIGIN) == 403
+
+
+@pytest.mark.parametrize("path,method", [
+    ("/openapi.json", "GET"), ("/docs", "GET"), ("/redoc", "GET"),
     ("/api/sources/../documents", "GET"), ("/static/%2e%2e/secret", "GET"),
-    ("/api/future-admin-route", "DELETE")])
-def test_private_routes_denied(path, method):
+    ("/api/future-admin-route", "DELETE"), ("/api/documents/id", "DELETE"),
+    ("/api/jobs", "POST"),
+])
+def test_unlisted_routes_are_denied(path, method):
+    assert request(path, method, ORIGIN) in {403, 405}
+
+
+@pytest.mark.parametrize("path,method", [
+    ("/api/documents", "POST"), ("/api/documents/id/metadata", "PATCH"),
+    ("/api/documents/id/retry", "POST"), ("/api/import-url", "POST"), ("/login", "POST"),
+])
+def test_state_changing_routes_need_same_origin(path, method):
     assert request(path, method) == 403
+    assert request(path, method, [(b"origin", b"https://evil.test")]) == 403
+    assert request(path, method, ORIGIN) == 200
+
+
+def test_admin_routes_reach_the_app_only_when_admin_account_is_configured():
+    async def run(path, method="GET"):
+        result = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"{}"}
+
+        async def send(event):
+            result.append(event)
+
+        gate = ReaderGateway(backend, "https://aitropos.ru", admin_routes=True)
+        await gate({"type": "http", "method": method, "path": path, "headers": ORIGIN}, receive, send)
+        return result[0]["status"]
+
+    assert asyncio.run(run("/review")) == 200
+    assert asyncio.run(run("/api/documents/id/review", "POST")) == 200
 
 
 @pytest.mark.parametrize("path", [
     "/",
     "/documents",
+    "/login",
     "/favicon.ico",
     "/static/app.js",
+    "/api/session",
     "/api/documents",
     "/api/documents/id/original",
     "/api/documents/id/view",
@@ -51,11 +89,37 @@ def test_private_routes_denied(path, method):
     "/api/documents/id/original-page/1",
     "/api/sources/id-123",
     "/api/sources/id-123/highlight",
+    "/api/jobs",
+    "/api/jobs/job-1",
     "/api/ask/active",
     "/api/ask/status/req-123",
 ])
-def test_reader_routes(path):
+def test_user_routes(path):
     assert request(path) == 200
+
+
+def test_upload_body_limit_is_enforced_before_the_app_sees_it():
+    gate = lambda: ReaderGateway(backend, "https://aitropos.ru", max_upload_mb=1)
+
+    async def run(declared=None, body=b"x"):
+        result = []
+
+        async def receive():
+            return {"type": "http.request", "body": body}
+
+        async def send(event):
+            result.append(event)
+
+        headers = [*ORIGIN, (b"content-type", b"multipart/form-data; boundary=x")]
+        if declared is not None:
+            headers.append((b"content-length", str(declared).encode()))
+        await gate()({"type": "http", "method": "POST", "path": "/api/documents", "headers": headers},
+                     receive, send)
+        return result[0]["status"]
+
+    assert asyncio.run(run(declared=5 * 1024 * 1024)) == 413
+    assert asyncio.run(run(body=b"x" * (3 * 1024 * 1024))) == 413
+    assert asyncio.run(run(body=b"x" * (1024 * 1024))) == 200
 
 
 def test_csrf_and_body_bound():
@@ -215,7 +279,7 @@ def test_windows_supervisor_stops_venv_interpreter_tree(tmp_path):
             while True:
                 assert supervisor.poll() is None
                 try:
-                    if client.get(f"http://127.0.0.1:{port}/").status_code == 200:
+                    if client.get(f"http://127.0.0.1:{port}/health").status_code == 200:
                         break
                 except httpx.TransportError:
                     pass
@@ -231,38 +295,3 @@ def test_windows_supervisor_stops_venv_interpreter_tree(tmp_path):
         assert sock.connect_ex(("127.0.0.1", port)) != 0, "Orphan interpreter still listening"
     with offline_lock(data):
         pass
-
-
-def test_public_tabs_and_ask_work_through_reader_gateway_without_auth(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-    from navigator.config import Settings
-    from navigator.main import create_app
-
-    settings = Settings(
-        _env_file=None,
-        profile="development",
-        data_dir=tmp_path / "data",
-        review_dir=tmp_path / "review",
-        ml_enabled=False,
-        llm_enabled=False,
-    )
-    monkeypatch.setattr("navigator.main.get_settings", lambda: settings)
-    app = ReaderGateway(create_app(synthetic_fallback=False), "https://aitropos.ru")
-    with TestClient(app) as client:
-        assert client.get("/").status_code == 200
-        assert client.get("/documents").status_code == 200
-        docs_res = client.get("/api/documents")
-        assert docs_res.status_code == 200 and docs_res.json()["documents"] == []
-        active_res = client.get("/api/ask/active")
-        assert active_res.status_code == 200 and active_res.json() == {"active": None}
-        ask_res = client.post(
-            "/api/ask",
-            json={"question": "Как зовут Ливанова, кто это?"},
-            headers={"Origin": "https://aitropos.ru", "Content-Type": "application/json"},
-        )
-        assert ask_res.status_code == 200
-        assert ask_res.json()["status"] == "not_found"
-        # Admin/write endpoints stay blocked
-        assert client.get("/review").status_code == 403
-        assert client.post("/api/documents").status_code == 403
-        assert client.patch("/api/documents/missing/metadata", json={}).status_code == 403

@@ -13,6 +13,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from navigator.auth import (
+    ROLE_ADMIN, ROLE_KEY, USER_KEY, AuthConfig, AuthMiddleware, safe_next,
+)
 from navigator.config import get_settings
 from navigator.ui.health import build_health
 from navigator.ui.integration import (
@@ -50,6 +53,18 @@ SOURCE_CSP = (
     "base-uri 'none'; "
     "form-action 'none'"
 )
+
+
+def render_login(config: AuthConfig, *, message: str = "", next_url: str = "/") -> str:
+    """Standalone login page. The public demo credentials are prefilled (and printed)."""
+    return templates.get_template("login.html").render({
+        "message": message,
+        "next_url": next_url,
+        "demo": config.demo_enabled,
+        "demo_username": config.demo_username,
+        "demo_password": config.demo_password,
+        "admin_available": config.admin_enabled,
+    })
 
 
 def _include_feature(
@@ -97,6 +112,7 @@ def create_app(
     documents_router: Any | None = None,
     synthetic_fallback: bool | None = None,
     document_service: Any | None = None,
+    auth_required: bool | None = None,
 ) -> FastAPI:
     settings = document_service.settings if document_service is not None else get_settings()
 
@@ -136,6 +152,7 @@ def create_app(
         version="0.1.0",
     )
     app.state.settings = settings
+    app.state.auth = AuthConfig.from_settings(settings, required=auth_required)
     if document_service is not None:
         app.state.store = document_service.store
     app.state.health_cache = None
@@ -208,7 +225,10 @@ def create_app(
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        # "no-referrer" makes browsers send ``Origin: null`` with same-origin form posts (login,
+        # logout), which the CSRF check must refuse. "same-origin" keeps cross-site referrers
+        # private and lets same-site forms carry their real Origin.
+        response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         path = request.url.path
         if path.startswith(("/review-files/", "/review")):
@@ -219,11 +239,18 @@ def create_app(
             response.headers.setdefault("Content-Security-Policy", PAGE_CSP)
         return response
 
+    # Added after the headers middleware, so authentication runs first (outermost).
+    app.add_middleware(AuthMiddleware, config=app.state.auth)
+
     def page_context(request: Request, page: str) -> dict[str, Any]:
         return {
             "request": request,
             "page": page,
             "integration": app.state.integration,
+            "reader_mode": False,  # kept for old templates: every user now has the full upload UI
+            "auth_required": app.state.auth.required,
+            "is_admin": request.scope.get(ROLE_KEY) == ROLE_ADMIN,
+            "username": request.scope.get(USER_KEY) or "",
             "profile": settings.profile,
             "max_upload_mb": settings.max_upload_mb,
             "ask_timeout_seconds": int(settings.request_timeout * 4) + 30,
@@ -246,8 +273,27 @@ def create_app(
             context=page_context(request, "documents"),
         )
 
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(request: Request, next: str = "/"):
+        if not app.state.auth.required or request.scope.get(ROLE_KEY):
+            return RedirectResponse(safe_next(next), status_code=303)
+        return HTMLResponse(render_login(app.state.auth, next_url=safe_next(next)))
+
+    @app.get("/api/session")
+    async def session_info(request: Request) -> JSONResponse:
+        role = request.scope.get(ROLE_KEY)
+        return JSONResponse({
+            "authenticated": bool(role) or not app.state.auth.required,
+            "auth_required": app.state.auth.required,
+            "username": request.scope.get(USER_KEY),
+            "is_admin": role == ROLE_ADMIN,
+        }, headers={"Cache-Control": "no-store"})
+
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
+        if app.state.auth.required and not request.scope.get(ROLE_KEY):
+            # Anonymous probes learn only whether the application is up, never its internals.
+            return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
         now = time.monotonic()
         cache = app.state.health_cache
         if cache and now - cache["at"] < 5.0:

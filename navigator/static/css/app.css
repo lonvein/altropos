@@ -954,22 +954,66 @@ code,
   border-color: color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
-.import-result {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--border);
-}
+
 
 .import-links {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.55rem;
   margin: 0.8rem 0;
   padding: 0;
   list-style: none;
 }
 
+/* Found documents use the width of their own container: two columns when it is wide
+   enough, one column otherwise. Items never overflow (long titles and URLs wrap). */
+.import-result {
+  container-type: inline-size;
+  container-name: import-result;
+}
+
+@container import-result (min-width: 42rem) {
+  .import-links {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+  }
+}
+
+@supports not (container-type: inline-size) {
+  @media (min-width: 1000px) {
+    .import-links {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+}
+
+.import-links--outcomes {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.panel--import-result {
+  grid-column: 1 / -1;
+}
+
+.panel--import-result[hidden],
+.import-link[hidden] {
+  display: none;
+}
+
+.import-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block: 0.6rem 0;
+}
+
+.import-bulk[hidden] {
+  display: none;
+}
+
 .import-link {
+  min-width: 0;
   padding: 0.6rem 0.7rem;
   background: var(--surface-muted);
   border: 1px solid var(--border);
@@ -1001,6 +1045,7 @@ code,
   flex-direction: column;
   gap: 0.1rem;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .import-link__url {
@@ -1394,22 +1439,29 @@ code,
 .source-original-stage {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   min-height: 100%;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
+}
+
+.source-original-stage > .source-original-canvas {
+  margin-inline: auto;
 }
 
 .source-original-canvas {
   position: relative;
-  display: inline-block;
+  display: block;
+  flex: none;
   line-height: 0;
   background: #ffffff;
-  border: 1px solid var(--border-strong);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+  /* No border: it would offset the image from the highlight layer's coordinate box. */
+  box-shadow: 0 0 0 1px var(--border-strong), 0 8px 24px rgba(15, 23, 42, 0.14);
 }
 
 .source-original-image {
   display: block;
+  width: 100%;
   max-width: none;
   height: auto;
   user-select: none;
@@ -1420,14 +1472,18 @@ code,
   inset: 0;
   pointer-events: none;
   z-index: 2;
+  overflow: hidden;
 }
 
 .original-highlight-box {
   position: absolute;
+  min-width: 3px;
+  min-height: 3px;
   background: rgba(255, 214, 0, 0.34);
-  border: 2px solid rgba(217, 119, 6, 0.9);
-  border-radius: 3px;
-  box-sizing: border-box;
+  outline: 1px solid rgba(217, 119, 6, 0.85);
+  outline-offset: 0;
+  border-radius: 2px;
+  mix-blend-mode: multiply;
   pointer-events: none;
 }
 
@@ -1708,4 +1764,130 @@ code,
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---- Login page -------------------------------------------------------- */
+.login-body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 1.5rem 1rem;
+}
+
+.login-card {
+  width: min(26rem, 100%);
+  padding: 1.75rem 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+}
+
+.login-brand {
+  margin-bottom: 1rem;
+}
+
+.login-card h1 {
+  margin: 0 0 1rem;
+  font-size: 1.35rem;
+}
+
+.header-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  font-size: 0.85rem;
+}
+
+.header-user form {
+  margin: 0;
+}
+
+/* ---- Multi-file upload ------------------------------------------------- */
+.dropzone {
+  padding: 1rem;
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.dropzone.is-dragover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-muted));
+}
+
+.dropzone__label {
+  display: block;
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+}
+
+.dropzone input[type="file"] {
+  max-width: 100%;
+}
+
+.upload-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 22rem;
+  margin: 0.9rem 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.upload-queue[hidden] {
+  display: none;
+}
+
+.upload-item {
+  padding: 0.6rem 0.7rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.upload-item.is-error {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.upload-item__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+}
+
+.upload-item__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.upload-item__badge {
+  margin-left: auto;
+}
+
+.upload-item__progress {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  margin-top: 0.4rem;
+  accent-color: var(--accent);
+}
+
+.upload-item__detail {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.upload-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
 }

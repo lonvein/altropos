@@ -12,6 +12,9 @@ from pydantic import ValidationError
 from navigator.config import Settings
 from navigator.db import Store, fragments_digest
 from navigator.interfaces import ComponentError, LLMClient, Searcher
+from navigator.rag.context import (
+    estimate_tokens, is_procedural_question, material_omissions, payload_json,
+)
 from navigator.rag.retrieval import _substantive_tokens
 from navigator.rag.validation import validate_answer, validate_draft
 from navigator.schemas import (
@@ -21,6 +24,8 @@ from navigator.schemas import (
 )
 
 log = logging.getLogger(__name__)
+
+CONTEXT_WARNING = "Контекст сокращён; полнота ответа не подтверждается."
 
 
 def _is_definitional_question(question: str) -> bool:
@@ -44,15 +49,8 @@ def _is_definitional_question(question: str) -> bool:
 
 
 def _context_tokens(candidate: list[Fragment]) -> int:
-    if len(candidate) <= 1:
-        compact = [
-            {"id": f.id, "section": f.section, "text": f.text}
-            for f in candidate
-        ]
-        size = len(json.dumps(compact, ensure_ascii=False))
-        return ceil(size / 2)
-    serialized = json.dumps([f.model_dump(mode="json") for f in candidate], ensure_ascii=False)
-    return ceil(len(serialized) / 1.75)
+    """Offline estimate of what the client measures against ``context_budget``."""
+    return estimate_tokens(payload_json(candidate))
 
 
 def _compact_fragment_for_context(fragment: Fragment, question: str, max_chars: int) -> Fragment:
@@ -157,9 +155,12 @@ class AnswerPipeline:
         if not result.publication_ids:
             return [], [], bool(result.hits)
         placeholders = ",".join("?" for _ in result.publication_ids)
+        document_ids = sorted({hit.fragment.document_id for hit in result.hits})
+        doc_placeholders = ",".join("?" for _ in document_ids)
         rows = self.store.rows(f"""SELECT p.id,p.manifest,p.fragments,d.payload,
             d.title,d.metadata FROM publications p JOIN documents d ON d.id=p.document_id
-            WHERE p.id IN ({placeholders}) AND d.status='ready'""", result.publication_ids)
+            WHERE p.id IN ({placeholders}) AND d.id IN ({doc_placeholders})
+            AND d.status='ready'""", [*result.publication_ids, *document_ids])
         trusted = {}
         for row in rows:
             manifest = IndexManifest.model_validate_json(row["manifest"])
@@ -209,7 +210,7 @@ class AnswerPipeline:
             if status == "not_found":
                 cleaned_warnings = [
                     w for w in cleaned_warnings
-                    if w != "Контекст сокращён; полнота ответа не подтверждается."
+                    if w != CONTEXT_WARNING
                 ]
             return AskResponse(status=status, mode=mode, answer_mode="sources_only",
                                sources=sources, timings=timings,
@@ -238,35 +239,59 @@ class AnswerPipeline:
         if self.llm is None or not self.settings.llm_enabled:
             return fallback("LLM отключена; приведены только источники без выводов и проверки полноты.")
 
-        # Conservative admission check against profile budget; bounded context-reduction
-        # retries handle exact tokenizer overflows from prompt/schema/repair overhead.
+        # Fit as many ranked fragments as the profile budget allows. The *client's* tokenizer is
+        # authoritative when available; the character estimate is only an offline fallback.
+        # Leaving a fragment out is recorded, but it limits the answer only when it is material.
         is_definitional = _is_definitional_question(request.question)
         effective_budget = min(
             self.settings.context_budget,
             max(1, self.settings.context_size - self.settings.max_output_tokens - self.settings.prompt_reserve_tokens),
         )
+        titles = {s.fragment_id: s.title for s in sources}
+        counter = getattr(self.llm, "count_tokens", None)
+
+        async def payload_tokens(candidate: list[Fragment]) -> int:
+            text = payload_json(candidate)
+            if counter is not None:
+                try:
+                    return int(await counter(text))
+                except (ComponentError, OSError, TimeoutError, RuntimeError, ValueError):
+                    pass
+            return estimate_tokens(text)
+
         selected = []
         for fragment in fragments[:self.settings.top_fragments]:
             candidate = selected + [fragment]
             budget_limit = self.settings.context_budget if len(candidate) == 1 else effective_budget
-            if _context_tokens(candidate) <= budget_limit:
+            if await payload_tokens(candidate) <= budget_limit:
                 selected = candidate
-        if is_definitional and selected and not rejected:
-            limited = False
-        else:
-            limited = rejected or len(selected) < len(fragments)
+        truncated = False
         if not selected and fragments and self.settings.context_budget >= 256:
             max_single_chars = max(350, int(self.settings.context_budget * 1.4))
             compacted = _compact_fragment_for_context(fragments[0], request.question, max_single_chars)
-            if _context_tokens([compacted]) <= self.settings.context_budget:
+            if await payload_tokens([compacted]) <= self.settings.context_budget:
                 selected = [compacted]
-                limited = True
+                truncated = True
         if not selected:
             return fallback("Материалы не помещаются в бюджет контекста; приведены только источники.")
+        hits_by_id = {h.fragment.id: h for h in result.hits}
+        retrieved = [hits_by_id[f.id] for f in fragments if f.id in hits_by_id]
+
+        def material_limit() -> bool:
+            """A real limit of the answer: relevant material left out, or a source cut short."""
+            if truncated or rejected:
+                return True
+            whole = [f for f in selected]
+            omitted = material_omissions(retrieved, whole, request.question, titles)
+            if omitted:
+                log.info("Context omitted %d material fragment(s): %s", len(omitted),
+                         ", ".join(f.id for f in omitted))
+            return bool(omitted)
+
+        limited = material_limit()
 
         client = self.llm
         protocol_failed = False
-        context_shrunk = False
         compaction_steps = 0
 
         async def timed_call(stage, operation):
@@ -308,10 +333,10 @@ class AnswerPipeline:
                                 continue
                             draft = checked.checked_draft
                             claims = draft.summary + draft.steps
-                            effective_limited = limited or context_shrunk or compaction_steps > 0
+                            effective_limited = limited
                             run_warnings = list(warnings)
-                            if effective_limited and "Контекст сокращён; полнота ответа не подтверждается." not in run_warnings:
-                                run_warnings.append("Контекст сокращён; полнота ответа не подтверждается.")
+                            if effective_limited and not rejected and CONTEXT_WARNING not in run_warnings:
+                                run_warnings.append(CONTEXT_WARNING)
                             # Model warnings, issues and clarification are unverified prose.
                             # Only controlled server messages leave this boundary.
                             verification = Verification(supported=True,
@@ -323,7 +348,7 @@ class AnswerPipeline:
                                 if status == "not_found":
                                     filtered_warnings = [
                                         w for w in filtered_warnings
-                                        if w != "Контекст сокращён; полнота ответа не подтверждается."
+                                        if w != CONTEXT_WARNING
                                     ]
                                     filtered_warnings.append(
                                         "В предоставленных документах недостаточно сведений для ответа на вопрос."
@@ -347,7 +372,9 @@ class AnswerPipeline:
                                 status = "answered"
                             else:
                                 status = "partial"
-                                if not is_definitional or effective_limited:
+                                # "Procedure completeness" is a statement about procedures: use it only for
+                                # procedural questions/answers, never for facts, definitions or conditions.
+                                if is_procedural_question(request.question) or draft.steps:
                                     filtered_warnings.append("Подтверждена только часть ответа; полнота процедуры не установлена.")
                                 else:
                                     filtered_warnings.append("Подтверждена только часть ответа.")
@@ -363,8 +390,7 @@ class AnswerPipeline:
                                 )
                                 if len(selected) > 1:
                                     selected = selected[:-1]
-                                    context_shrunk = True
-                                    limited = True
+                                    limited = material_limit()
                                     context_retried = True
                                     break
                                 if len(selected) == 1 and len(selected[0].text) > 500 and compaction_steps < 2:
@@ -373,7 +399,7 @@ class AnswerPipeline:
                                     compacted = _compact_fragment_for_context(selected[0], request.question, next_chars)
                                     if len(compacted.text) < len(selected[0].text):
                                         selected = [compacted]
-                                        context_shrunk = True
+                                        truncated = True
                                         limited = True
                                         context_retried = True
                                         break

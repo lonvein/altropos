@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     corpus_manifest: Path | None = None
     # A deployment with uncalibrated scores is explicitly marked in every answer.
     threshold_calibrated: bool = False
+    # Web login (public deployment). Off for the local loopback server.
+    auth_required: bool = False
+    public_origin: str = ""
+    session_secret: str = ""
+    session_hours: int = Field(default=12, ge=1, le=24 * 30)
+    admin_session_minutes: int = Field(default=120, ge=5, le=24 * 60)
+    # Public demo account: prefilled on the login page, never an administrator.
+    demo_login_enabled: bool = True
+    demo_username: str = "admin"
+    demo_password: str = "qwerty"
+    # Separate secret administrator account (PBKDF2 hash from scripts/deploy/make_admin_hash.py).
+    admin_username: str = ""
+    admin_password_hash: str = ""
 
     @model_validator(mode="before")
     @classmethod

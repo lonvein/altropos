@@ -141,6 +141,7 @@ class _Document:
             "warnings": list(self.warnings),
             "created": self.created,
             "fragment_id": self.fragment_id or None,
+            "presentation_url": f"/api/sources/{self.fragment_id}" if self.fragment_id else None,
             "original_available": bool(self.content),
         }
 

@@ -12,9 +12,7 @@ from navigator.config import Settings, get_settings
 from navigator.db import Store, fragments_digest
 from navigator.documents.queue import JobQueue
 from navigator.documents.site_importer import (
-    ALLOWED_DOC_EXTENSIONS,
-    fetch_mipt_bytes,
-    filename_from_url,
+    fetch_mipt_document,
     inspect_mipt_page,
     validate_mipt_url,
 )
@@ -33,6 +31,8 @@ from navigator.ingestion.metadata_extractor import extract_metadata
 from navigator.ingestion.model import Parsed
 from navigator.interfaces import Indexer
 from navigator.schemas import Document, Fragment, MetadataPatch, Relation
+
+IMPORT_DATE_WARNING = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class DocumentService:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise InitialCorpusReviewRequired("Corpus manifest is unavailable or invalid") from exc
 
-    def upload_file(self, filename: str, content: bytes) -> dict:
+    def upload_file(self, filename: str, content: bytes, *, source_url: str | None = None) -> dict:
         """Прием файла, дедупликация по SHA-256 и постановка в очередь обработки."""
         ext, media_type = self.storage.validate_file(filename, content)
         sha = sha256_bytes(content)
@@ -130,6 +130,8 @@ class DocumentService:
             original_path=rel_path,
             media_type=media_type,
             status="queued",
+            source_url=source_url,
+            retrieved_at=date.today() if source_url else None,
             metadata=MetadataPatch(),
             warnings=[],
         )
@@ -177,14 +179,9 @@ class DocumentService:
         registered = self.store.document(doc_id)
         if registered is None or sha256_bytes(full_path.read_bytes()) != registered["sha"]:
             raise ValueError("Changed original requires a new immutable document version")
-        is_reprocess = bool(
-            payload.get("reocr")
-            or payload.get("retry")
-            or payload.get("reprocess")
-            or registered.get("active_publication")
-        )
-        if not is_reprocess:
-            self._require_manual_upload_allowed(registered["sha"])
+        # Retry/re-OCR flags and historical publications do not approve a new
+        # extraction. Initial corpus bytes enter via verified review packages.
+        self._require_manual_upload_allowed(registered["sha"])
         if full_path.suffix.lower() == ".pdf":
             from navigator.ingestion.ocr import make_ocr
             parsed = parse_file(
@@ -248,7 +245,7 @@ class DocumentService:
         source_url = previous_doc.source_url if previous_doc else registered.get("url")
         retrieved_at = previous_doc.retrieved_at if previous_doc else None
         if source_url and not (meta.issued or meta.valid_from):
-            dated_warning = "Импортировано с сайта mipt.ru; дата актуальности редакции требует подтверждения."
+            dated_warning = IMPORT_DATE_WARNING
             if dated_warning not in warnings:
                 warnings.append(dated_warning)
         doc = Document(
@@ -287,12 +284,15 @@ class DocumentService:
         from navigator.documents.snapshots import save_snapshot
         save_snapshot(self.store, doc, fragments, parsed.blocks)
         index_res = self.indexer.index_document(doc_id, fragments)
+        if not self.index_status(doc_id)['verified']:
+            raise ValueError('Post-import index verification failed')
         self.store.execute("UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?", (doc_id,))
         return (
             "ready",
             {
                 "document_id": doc_id,
                 "publication_id": index_res.publication_id,
+                "index_verified": True,
                 "mode": index_res.mode,
                 "fragment_count": index_res.fragment_count,
                 "warnings": index_res.warnings,
@@ -327,30 +327,16 @@ class DocumentService:
         try:
             for target_url in selected_urls:
                 try:
-                    clean_target = validate_mipt_url(target_url)
-                    name = filename_from_url(clean_target)
-                    if Path(name).suffix.lower() not in ALLOWED_DOC_EXTENSIONS:
-                        raise ValueError("Поддерживаются только файлы PDF, DOCX и XLSX.")
-
-                    final_url, content, _content_type = fetch_mipt_bytes(
-                        clean_target,
+                    final_url, final_name, content = fetch_mipt_document(
+                        target_url,
                         max_bytes=self.storage.max_bytes,
                         timeout=self.settings.request_timeout,
                         transport=self.http_transport,
                     )
-                    final_name = filename_from_url(final_url, fallback=name)
-                    if Path(final_name).suffix.lower() not in ALLOWED_DOC_EXTENSIONS:
-                        final_name = name
-
-                    upload_res = self.upload_file(final_name, content)
+                    upload_res = self.upload_file(final_name, content, source_url=final_url)
                     doc_id = upload_res["document_id"]
 
                     if not upload_res.get("duplicate"):
-                        today_iso = date.today().isoformat()
-                        self.store.execute(
-                            "UPDATE documents SET url=?, payload=json_set(payload, '$.source_url', ?, '$.retrieved_at', ?) WHERE id=?",
-                            (final_url, final_url, today_iso, doc_id),
-                        )
                         child_job_id = upload_res.get("job_id")
                         child_payload = {
                             "document_id": doc_id,
@@ -381,7 +367,12 @@ class DocumentService:
                     if doc_record is not None:
                         doc_record.pop("original_path", None)
                         created_docs.append(doc_record)
-                except ValueError as exc:
+                except InitialCorpusReviewRequired:
+                    rejected.append({
+                        "url": target_url,
+                        "reason": "Стартовый документ добавляется после одобрения распознанного пакета.",
+                    })
+                except (ValueError, ParseError) as exc:
                     rejected.append({"url": target_url, "reason": str(exc)})
                 except Exception:
                     logger.exception("Ошибка загрузки выбранного URL %s", target_url)
@@ -422,6 +413,15 @@ class DocumentService:
             self._run_import_url_job(job_id, payload)
             return True
 
+        if kind == 'reindex':
+            try:
+                result = self.indexer.reindex_document(payload['document_id'])
+                self.queue.complete_job(job_id, status='ready', result={**result.model_dump(mode='json'), 'index_verified': True})
+            except Exception:
+                logger.exception('Reindex failed for %s', payload['document_id'])
+                self.queue.complete_job(job_id, status='failed', error='Индекс не восстановлен; проверьте доступность моделей, артефакты и согласованность опубликованной версии. Непроверенная версия требует проверки.')
+            return True
+
         doc_id = payload["document_id"]
         try:
             final_status, result = self._process_file_payload(payload)
@@ -446,6 +446,24 @@ class DocumentService:
         while processed < max_jobs and self.process_next_job():
             processed += 1
         return processed
+
+    def index_status(self, doc_id: str) -> dict:
+        from navigator.rag.indexing import inspect_index
+        from navigator.interfaces import ComponentError
+        try:
+            return {'status': 'ready', **inspect_index(self.store, doc_id)}
+        except (ValueError, OSError, RuntimeError, ImportError, ComponentError):
+            return {'document_id': doc_id, 'status': 'invalid', 'verified': False,
+                    'message': 'Нет согласованной ready-публикации: проверьте версию или переиндексируйте опубликованный текст.'}
+
+    def reindex_document(self, doc_id: str) -> dict:
+        # No upload, new document IDs or mutable extraction cache are involved.
+        row = self.store.document(doc_id)
+        if not row or row['status'] != 'ready' or not row.get('active_publication'):
+            raise ValueError('Переиндексация требует опубликованной версии документа.')
+        existing = self.store.rows("SELECT id FROM jobs WHERE kind='reindex' AND status IN ('queued','processing') AND json_extract(payload,'$.document_id')=?", (doc_id,))
+        job_id = existing[0]['id'] if existing else self.queue.enqueue('reindex', {'document_id': doc_id})
+        return {'document_id': doc_id, 'job_id': job_id, 'status': 'queued'}
 
     @staticmethod
     def _next_version(current_version: str | None) -> str:
@@ -542,115 +560,12 @@ class DocumentService:
         )
 
     def _heal_inconsistent_documents(self) -> None:
-        """Repair stale failed/needs_review states caused by noisy OCR or confirmation notices."""
-        rows = self.store.rows(
-            "SELECT * FROM documents WHERE status IN ('failed', 'error', 'needs_review', 'ready')"
-        )
-        for row in rows:
-            raw_payload = row.get("payload")
-            if not raw_payload:
-                continue
-            try:
-                payload_dict = json.loads(raw_payload)
-                meta = json.loads(row.get("metadata") or "{}")
-            except Exception:
-                continue
+        """Startup never infers publication or legal review from cached state.
 
-            doc_id = row["id"]
-            status = row["status"]
-            raw_warnings = list(payload_dict.get("warnings") or [])
-            operator_confirmed = self._has_visual_confirmation(raw_warnings)
-            ready_warnings = filter_user_warnings(raw_warnings, status="ready", needs_review=False)
-            active_pub = row.get("active_publication")
-            reviewed_val = meta.get("reviewed")
-
-            if status in {"failed", "error"}:
-                if active_pub:
-                    new_meta = dict(meta)
-                    if operator_confirmed and new_meta.get("reviewed") is False:
-                        new_meta["reviewed"] = True
-                    elif new_meta.get("reviewed") is False:
-                        new_meta["reviewed"] = None
-                    payload_dict["status"] = "ready"
-                    payload_dict["warnings"] = ready_warnings
-                    payload_dict["metadata"] = new_meta
-                    self.store.execute(
-                        "UPDATE documents SET status='ready', metadata=?, payload=? WHERE id=?",
-                        (
-                            json.dumps(new_meta, ensure_ascii=False),
-                            json.dumps(payload_dict, ensure_ascii=False),
-                            doc_id,
-                        ),
-                    )
-                    continue
-
-                if (reviewed_val is True or operator_confirmed) and not ready_warnings:
-                    blocks = self.storage.get_extracted_blocks(doc_id)
-                    if blocks:
-                        try:
-                            self.submit_review(
-                                doc_id,
-                                decision="approved",
-                                reviewer="Система (автовосстановление)",
-                                comment="Восстановление статуса после устранения ложного сбоя OCR.",
-                            )
-                        except Exception:
-                            logger.debug("Не удалось перепубликовать документ %s", doc_id, exc_info=True)
-                continue
-
-            if status == "needs_review" and (reviewed_val is True or operator_confirmed) and not ready_warnings:
-                if active_pub:
-                    new_meta = dict(meta)
-                    if operator_confirmed and new_meta.get("reviewed") is False:
-                        new_meta["reviewed"] = True
-                    elif new_meta.get("reviewed") is False:
-                        new_meta["reviewed"] = None
-                    payload_dict["status"] = "ready"
-                    payload_dict["warnings"] = ready_warnings
-                    payload_dict["metadata"] = new_meta
-                    self.store.execute(
-                        "UPDATE documents SET status='ready', metadata=?, payload=? WHERE id=?",
-                        (
-                            json.dumps(new_meta, ensure_ascii=False),
-                            json.dumps(payload_dict, ensure_ascii=False),
-                            doc_id,
-                        ),
-                    )
-                else:
-                    blocks = self.storage.get_extracted_blocks(doc_id)
-                    if blocks:
-                        try:
-                            self.submit_review(
-                                doc_id,
-                                decision="approved",
-                                reviewer="Оператор (подтверждение по оригиналу)"
-                                if operator_confirmed
-                                else "Администратор",
-                                comment="Автоматическое завершение проверки без неразрешённых замечаний.",
-                            )
-                        except Exception:
-                            logger.debug("Не удалось опубликовать подтверждённый документ %s", doc_id, exc_info=True)
-                continue
-
-            if status == "ready":
-                changed = False
-                new_meta = dict(meta)
-                if new_meta.get("reviewed") is False:
-                    new_meta["reviewed"] = True if operator_confirmed else None
-                    changed = True
-                if ready_warnings != raw_warnings:
-                    payload_dict["warnings"] = ready_warnings
-                    changed = True
-                if changed:
-                    payload_dict["metadata"] = new_meta
-                    self.store.execute(
-                        "UPDATE documents SET metadata=?, payload=? WHERE id=?",
-                        (
-                            json.dumps(new_meta, ensure_ascii=False),
-                            json.dumps(payload_dict, ensure_ascii=False),
-                            doc_id,
-                        ),
-                    )
+        Failed/pending documents require an explicit operator decision. Metadata
+        and warning prose are not an approval record for recognized content.
+        """
+        return None
 
         for row in self.store.rows(
             "SELECT * FROM documents WHERE status IN ('ready', 'needs_review')"
@@ -970,7 +885,9 @@ class DocumentService:
         doc = Document.model_validate_json(row["payload"])
         meta = doc.metadata.model_copy()
         new_title = (title.strip()[:500] if title and title.strip() else doc.title)
-        meta = meta.model_copy(update={"title": new_title, "reviewed": decision == "approved"})
+        # This decision concerns recognized text; legal metadata review is
+        # independent and changes only through its explicit metadata editor.
+        meta = meta.model_copy(update={"title": new_title})
 
         has_edits = corrected_blocks is not None
         if has_edits:
@@ -1252,9 +1169,12 @@ class DocumentService:
             if row["status"] == "processing":
                 raise ValueError("Дождитесь окончания обработки")
             doc = Document.model_validate_json(row["payload"])
-            updated_meta = MetadataPatch.model_validate({
+            metadata_values = {
                 **doc.metadata.model_dump(), **patch.model_dump(exclude_unset=True),
-            })
+            }
+            if patch.reviewed is True and not metadata_values.get("valid_from"):
+                metadata_values["valid_from"] = date.today()
+            updated_meta = MetadataPatch.model_validate(metadata_values)
             if updated_meta.relations:
                 updated_meta = updated_meta.model_copy(
                     update={"relations": self._resolve_relations(updated_meta.relations, con=con)}
@@ -1310,11 +1230,8 @@ class DocumentService:
         warnings = filter_user_warnings(raw_warnings, status=status, needs_review=(status == "needs_review"))
         if isinstance(meta, dict):
             meta = dict(meta)
-            if meta.get("reviewed") is False:
-                if self._has_visual_confirmation(raw_warnings) and not warnings:
-                    meta["reviewed"] = True
-                elif status == "ready" or self._has_visual_confirmation(raw_warnings):
-                    meta["reviewed"] = None
+            if meta.get("reviewed") is True:
+                warnings = [warning for warning in warnings if warning != IMPORT_DATE_WARNING]
         fragment_id = None
         if row["status"] == "ready":
             fragments = self.store.rows("SELECT id FROM fragments WHERE document_id=? ORDER BY ordinal LIMIT 1", (row["id"],))
@@ -1322,6 +1239,7 @@ class DocumentService:
         return {
             "fragment_id": fragment_id,
             "presentation_url": f"/api/documents/{row['id']}/view" if fragment_id else None,
+            "index_url": f"/api/documents/{row['id']}/index",
             "id": row["id"],
             "name": row["name"],
             "title": row["title"],

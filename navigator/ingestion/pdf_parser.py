@@ -45,6 +45,20 @@ def _bbox(box, page) -> list[float] | None:
     return [x0, y0, x1, y1] if x0 < x1 and y0 < y1 else None
 
 
+def _clamp_box(box, size) -> list[float] | None:
+    """Clamp a box already in page-relative points (OCR output) without shifting its origin.
+
+    OCR renders exactly what the reader sees (CropBox, /Rotate applied) from its top-left
+    corner, so its boxes start at (0, 0) in the *viewer frame*. Text-layer boxes are absolute
+    in pdfplumber's frame and need ``_bbox``; subtracting the page origin from OCR boxes
+    shifted every OCR line of PDFs with an offset MediaBox.
+    """
+    x0, y0, x1, y1 = (round(float(v), 1) for v in box)
+    x0, y0 = max(0.0, x0), max(0.0, y0)
+    x1, y1 = min(round(float(size[0]), 1), x1), min(round(float(size[1]), 1), y1)
+    return [x0, y0, x1, y1] if x0 < x1 and y0 < y1 else None
+
+
 def _image_dominant(page) -> bool:
     """Detect substantial raster content even when a native header is readable.
 
@@ -262,6 +276,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
             raster_body = _image_dominant(page)
             if len(native_text) < MIN_PAGE_CHARS or _broken_encoding(native_text) or raster_body:
                 result = _ocr_page(page, number, ocr)
+                ocr_dims = [round(float(v), 1) for v in (getattr(result, "page_size", None) or page_dims)]
                 diag.update(result.diagnostics)
                 if raster_body:
                     diag['raster_body'] = True
@@ -280,9 +295,15 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     for ln in raw_lines:
                         if not isinstance(ln, dict):
                             continue
-                        lbox = _bbox(ln["bbox"], page) if ln.get("bbox") else None
+                        lbox = _clamp_box(ln["bbox"], ocr_dims) if ln.get("bbox") else None
                         if lbox:
-                            norm_lines.append({"text": ln.get("text", ""), "bbox": lbox})
+                            entry = {"text": ln.get("text", ""), "bbox": lbox}
+                            words = [{"text": w["text"], "bbox": wbox} for w in ln.get("words") or []
+                                     if isinstance(w, dict) and w.get("bbox")
+                                     and (wbox := _clamp_box(w["bbox"], ocr_dims))]
+                            if words:
+                                entry["words"] = words
+                            norm_lines.append(entry)
                     if item.get("table"):
                         rows = [[_clean(str(c)) for c in row] for row in item["table"]]
                         rows = [row for row in rows if any(row)]
@@ -295,12 +316,12 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                             units.append(Unit(text="\n".join(" | ".join(r) for r in rows), locator=loc, kind="table",
                                               path=outline.path, table_header=header, rows=body))
                             blocks.append({"page": number, "table": rows, "bbox": item.get("bbox"),
-                                           "lines": norm_lines, "page_size": page_dims, "ocr": True,
-                                           "conf": item.get("conf")})
+                                           "lines": norm_lines, "page_size": ocr_dims, "frame": "viewer",
+                                           "ocr": True, "conf": item.get("conf")})
                         continue
                     if item.get("suspected_rule"):
                         blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
-                                       "lines": norm_lines, "page_size": page_dims,
+                                       "lines": norm_lines, "page_size": ocr_dims, "frame": "viewer",
                                        "ocr": True, "kind": "ocr_artifact", "suspected_rule": True})
                         diag["needs_review"] = True
                         continue
@@ -316,7 +337,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                                                         max(old[2],new[2]),max(old[3],new[3])]
                         merged_lines = list(previous_block.get("lines") or []) + norm_lines
                         previous_block.update(text=previous.text, bbox=previous.locator.get("bbox"),
-                                              lines=merged_lines, page_size=page_dims)
+                                              lines=merged_lines, page_size=ocr_dims)
                         continue
                     box = item.get("bbox")
                     is_note = bool(item.get("note"))
@@ -328,7 +349,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                                       path=info.path if info else outline.path,
                                       kind=info.kind if info else "note", atomic=len(item["text"]) < 900))
                     blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
-                                   "lines": norm_lines, "page_size": page_dims, "ocr": True,
+                                   "lines": norm_lines, "page_size": ocr_dims, "frame": "viewer", "ocr": True,
                                    "conf": item.get("conf"), "reference_markers": item.get("reference_markers", []),
                                    "kind": "note" if is_note else info.kind,
                                    "list_item": bool(item.get("list_item")), "raw_text": item.get("raw_text", item["text"]),
@@ -419,6 +440,18 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                   diagnostics=diagnostics)
 
 
+def _displayed_size(page) -> tuple[float, float]:
+    """Size in points of the page as the reader sees it (CropBox, /Rotate applied)."""
+    try:
+        from navigator.documents.pdf_geometry import frame_from_boxes
+
+        # pdfplumber hands over MediaBox/CropBox already rotated by /Rotate.
+        shown = frame_from_boxes(page.mediabox, page.cropbox, 0)
+        return shown.width, shown.height
+    except Exception:
+        return float(page.width), float(page.height)
+
+
 def _ocr_page(page, number: int, ocr):
     """Legacy two-argument hooks remain supported; rich hooks receive display size."""
     diag = {"page": number, "source": "error", "rotation": None,
@@ -427,22 +460,31 @@ def _ocr_page(page, number: int, ocr):
         diag["warnings"].append("OCR недоступен")
         return OCRResult(**diag)
     try:
+        # Render exactly what the viewer shows (CropBox + /Rotate). ``force_mediabox`` makes
+        # pdfplumber paint everything outside the CropBox black, which both degrades OCR and
+        # puts OCR boxes in a frame the viewer never draws.
+        from navigator.documents.pdf_geometry import PDFIUM_LOCK
         max_pts = max(float(getattr(page, "width", 0) or 0), float(getattr(page, "height", 0) or 0), 842.0)
         resolution = min(300, max(144, round(300.0 * 842.0 / max_pts)))
-        image = page.to_image(resolution=resolution, force_mediabox=True).original
+        with PDFIUM_LOCK:
+            image = page.to_image(resolution=resolution).original
+        size_pt = _displayed_size(page)
         if getattr(ocr, "supports_page_size", False):
-            items = ocr(image, number, page_size=(float(page.width), float(page.height)))
+            items = ocr(image, number, page_size=size_pt)
         else:
             items = ocr(image, number)
         if hasattr(items, "diagnostics"):
             if not items and image.convert("L").getextrema()[0] > 250:
                 items.diagnostics["source"] = "blank"
+            items.page_size = size_pt
             return items
         diag.update(source="ocr", needs_review=not bool(items))
         # Legacy hooks have no orientation/confidence evidence.
         if not items and image.convert("L").getextrema()[0] > 250:
             diag["source"] = "blank"
-        return OCRResult(items or (), **diag)
+        result = OCRResult(items or (), **diag)
+        result.page_size = size_pt
+        return result
     except Exception:
         diag["warnings"].append("Не удалось отрисовать или распознать страницу")
         return OCRResult(**diag)

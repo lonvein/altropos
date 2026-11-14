@@ -57,7 +57,12 @@
       fitWidth: true,
       highlightData: null,
       originalInfo: null,
+      loadedScale: 0,
+      loadedPage: 0,
     };
+    const CSS_PX_PER_PT = 96 / 72; // 100% zoom = the page at its natural CSS size
+    const MIN_ZOOM = 0.4;
+    const MAX_ZOOM = 3;
 
     function clearError() {
       A.setText(sourceMessage, "");
@@ -129,24 +134,45 @@
       updateZoomLabel();
     }
 
-    function computeImageTargetWidth() {
-      const natW = sourceOriginalImage?.naturalWidth || 780;
-      const natH = sourceOriginalImage?.naturalHeight || 1050;
+    // Page width in PDF points as the server renders it (viewer frame).
+    function pageWidthPt() {
+      const info = state.originalInfo;
+      const meta = info && Array.isArray(info.pages)
+        ? info.pages.find((p) => Number(p.page) === Number(state.currentPage))
+        : null;
+      const w = Number(meta?.width) || Number(state.highlightData?.page_width);
+      if (w > 0) {
+        return w;
+      }
+      const nat = sourceOriginalImage?.naturalWidth || 0;
+      return nat > 0 && state.loadedScale > 0 ? nat / state.loadedScale : 595;
+    }
+
+    function availableWidth() {
       if (!sourceViewport) {
-        return Math.round(natW * state.zoom);
+        return 780;
       }
-      const availW = Math.max(320, sourceViewport.clientWidth - 40);
+      const cs = window.getComputedStyle(sourceViewport);
+      const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+      return Math.max(280, sourceViewport.clientWidth - pad - 4);
+    }
+
+    function computeImageTargetWidth() {
+      const natural = pageWidthPt() * CSS_PX_PER_PT;
+      const avail = availableWidth();
       if (state.fitWidth) {
-        state.zoom = Math.max(0.4, Math.min(2.5, availW / Math.max(natW, 1)));
+        state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, avail / Math.max(natural, 1)));
         updateZoomLabel();
-        return Math.round(availW);
+        return Math.round(avail);
       }
-      const baseScale = Math.min(1.0, availW / Math.max(natW, 1));
-      const baseW = natW * baseScale;
-      if (!natW || !natH) {
-        return Math.round(760 * state.zoom);
-      }
-      return Math.max(200, Math.round(baseW * state.zoom));
+      return Math.max(200, Math.round(natural * state.zoom));
+    }
+
+    // Rendered bitmap resolution follows what is on screen, so zoomed text stays sharp.
+    function desiredScale(widthPx) {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const raw = (widthPx * dpr) / Math.max(pageWidthPt(), 1);
+      return Math.max(1, Math.min(3.5, Math.ceil(raw * 4) / 4));
     }
 
     function applyCanvasSize() {
@@ -158,11 +184,14 @@
           return;
         }
         const widthPx = computeImageTargetWidth();
-        sourceOriginalImage.style.width = `${widthPx}px`;
-        sourceOriginalImage.style.height = "auto";
+        // The canvas owns the width; image and highlight layer both fill it exactly, so
+        // percentage boxes can never drift away from the page bitmap.
         if (sourceOriginalCanvas) {
           sourceOriginalCanvas.style.width = `${widthPx}px`;
         }
+        sourceOriginalImage.style.width = "100%";
+        sourceOriginalImage.style.height = "auto";
+        maybeUpgradeBitmap(widthPx);
       } else if (sourceFrame) {
         sourceFrame.style.transformOrigin = "top left";
         if (state.fitWidth || Math.abs(state.zoom - 1.0) < 0.01) {
@@ -170,12 +199,77 @@
           sourceFrame.style.width = "100%";
           sourceFrame.style.height = "100%";
         } else {
-          const pct = 100 / Math.max(0.4, state.zoom);
+          const pct = 100 / Math.max(MIN_ZOOM, state.zoom);
           sourceFrame.style.transform = `scale(${state.zoom})`;
           sourceFrame.style.width = `${pct}%`;
           sourceFrame.style.height = `${pct}%`;
         }
       }
+    }
+
+    let upgradeTimer = 0;
+    function maybeUpgradeBitmap(widthPx) {
+      if (!state.documentId || !state.loadedPage) {
+        return;
+      }
+      const wanted = desiredScale(widthPx);
+      if (wanted <= state.loadedScale + 0.01) {
+        return;
+      }
+      window.clearTimeout(upgradeTimer);
+      const token = state.openToken;
+      upgradeTimer = window.setTimeout(() => {
+        if (token === state.openToken && state.mode === "original" && sourceDialog.open) {
+          requestPageBitmap(state.currentPage, wanted, { keepScroll: true });
+        }
+      }, 180);
+    }
+
+    function highlightUnion() {
+      const boxes = sourceHighlightLayer ? sourceHighlightLayer.querySelectorAll(".original-highlight-box") : [];
+      if (!boxes.length) {
+        return null;
+      }
+      let top = Infinity;
+      let left = Infinity;
+      let bottom = -Infinity;
+      let right = -Infinity;
+      boxes.forEach((el) => {
+        const r = el.getBoundingClientRect();
+        top = Math.min(top, r.top);
+        left = Math.min(left, r.left);
+        bottom = Math.max(bottom, r.bottom);
+        right = Math.max(right, r.right);
+      });
+      return { top, left, bottom, right };
+    }
+
+    // Bring the highlighted passage into view: vertically near the upper third, horizontally
+    // only when zoom made the page wider than the viewport.
+    function scrollToHighlight() {
+      if (!sourceViewport) {
+        return;
+      }
+      const union = highlightUnion();
+      if (!union) {
+        return;
+      }
+      const vp = sourceViewport.getBoundingClientRect();
+      const height = union.bottom - union.top;
+      const margin = sourceViewport.clientHeight * (height > sourceViewport.clientHeight * 0.7 ? 0.08 : 0.3);
+      let dy = union.top - vp.top - margin;
+      let dx = 0;
+      if (union.right > vp.right - 12 || union.left < vp.left + 12) {
+        dx = union.left - vp.left - Math.max(24, (sourceViewport.clientWidth - (union.right - union.left)) / 2);
+      }
+      if (!Number.isFinite(dy)) {
+        dy = 0;
+      }
+      sourceViewport.scrollTo({
+        top: Math.max(0, sourceViewport.scrollTop + dy),
+        left: Math.max(0, sourceViewport.scrollLeft + (Number.isFinite(dx) ? dx : 0)),
+        behavior: "auto",
+      });
     }
 
     function renderHighlightBoxes({ scrollIntoView = false } = {}) {
@@ -212,18 +306,13 @@
           sourceHighlightLayer.appendChild(rect);
         });
 
-        if (scrollIntoView && sourceViewport && sourceOriginalCanvas) {
-          const firstBox = sourceHighlightLayer.querySelector(".original-highlight-box");
-          if (firstBox) {
-            window.requestAnimationFrame(() => {
-              const vpRect = sourceViewport.getBoundingClientRect();
-              const boxRect = firstBox.getBoundingClientRect();
-              const delta = boxRect.top - vpRect.top - sourceViewport.clientHeight * 0.35;
-              if (Number.isFinite(delta)) {
-                sourceViewport.scrollTop = Math.max(0, sourceViewport.scrollTop + delta);
-              }
-            });
-          }
+        if (scrollIntoView && sourceViewport) {
+          // Two frames: the first lets the new canvas size and image settle into layout.
+          window.requestAnimationFrame(() => window.requestAnimationFrame(scrollToHighlight));
+        }
+        const other = (hl.pages || []).filter((n) => Number(n) !== Number(state.currentPage));
+        if (other.length > 0) {
+          showNotice(`Фрагмент продолжается на стр. ${other.join(", ")}.`);
         }
       } else {
         clearNotice();
@@ -277,7 +366,46 @@
       }
     }
 
-    function loadOriginalPage(pageNum, { scrollToHighlight = true } = {}) {
+    function requestPageBitmap(pageNum, scale, { keepScroll = false, scrollToTarget = false } = {}) {
+      const token = state.openToken;
+      const url = `/api/documents/${encodeURIComponent(state.documentId)}/original-page/${pageNum}?scale=${scale}`;
+      const apply = () => {
+        if (token !== state.openToken || state.mode !== "original") {
+          return;
+        }
+        state.loadedScale = scale;
+        state.loadedPage = pageNum;
+        sourceOriginalImage.onload = () => {
+          if (token !== state.openToken || state.mode !== "original") {
+            return;
+          }
+          clearError();
+          if (!keepScroll) {
+            applyCanvasSize();
+          }
+          renderHighlightBoxes({ scrollIntoView: scrollToTarget });
+        };
+        sourceOriginalImage.onerror = () => {
+          if (token !== state.openToken) {
+            return;
+          }
+          A.show(sourceOriginalImage, false);
+          clearHighlights();
+          showError("Не удалось загрузить страницу оригинала. Вы можете скачать исходный файл.");
+        };
+        sourceOriginalImage.src = url;
+      };
+      if (!keepScroll) {
+        apply();
+        return;
+      }
+      // Sharper bitmap for the current zoom: decode off-screen, then swap without flicker.
+      const probe = new Image();
+      probe.onload = apply;
+      probe.src = url;
+    }
+
+    function loadOriginalPage(pageNum, { scrollToHighlight: scrollToTarget = true } = {}) {
       if (!state.documentId) {
         return;
       }
@@ -303,28 +431,19 @@
       }
 
       A.show(sourceOriginalEmpty, false);
-      const token = state.openToken;
-      const imgUrl = `/api/documents/${encodeURIComponent(state.documentId)}/original-page/${clamped}?scale=1.75`;
       A.show(sourceOriginalImage, true);
       clearHighlights();
+      // Size the canvas before the bitmap arrives so highlights are placed on the final box.
+      applyCanvasSizeWithoutUpgrade();
+      const scale = desiredScale(sourceOriginalCanvas?.clientWidth || availableWidth());
+      requestPageBitmap(clamped, scale, { scrollToTarget });
+    }
 
-      sourceOriginalImage.onload = () => {
-        if (token !== state.openToken || state.mode !== "original") {
-          return;
-        }
-        clearError();
-        applyCanvasSize();
-        renderHighlightBoxes({ scrollIntoView: scrollToHighlight });
-      };
-      sourceOriginalImage.onerror = () => {
-        if (token !== state.openToken) {
-          return;
-        }
-        A.show(sourceOriginalImage, false);
-        clearHighlights();
-        showError("Не удалось загрузить страницу оригинала. Вы можете скачать исходный файл.");
-      };
-      sourceOriginalImage.src = imgUrl;
+    function applyCanvasSizeWithoutUpgrade() {
+      const saved = state.loadedPage;
+      state.loadedPage = 0; // suppress bitmap upgrade while the first bitmap is still pending
+      applyCanvasSize();
+      state.loadedPage = saved;
     }
 
     async function showOriginalMode({ jumpToTarget = true } = {}) {
@@ -421,6 +540,8 @@
       state.fitWidth = true;
       state.highlightData = null;
       state.originalInfo = null;
+      state.loadedScale = 0;
+      state.loadedPage = 0;
       state.sourcePath = A.safeApiPath(source?.url, ["/api/sources/", "/api/documents/"]);
       state.downloadUrl = state.documentId
         ? `/api/documents/${encodeURIComponent(state.documentId)}/original`
@@ -540,6 +661,8 @@
       state.fitWidth = true;
       state.highlightData = null;
       state.originalInfo = null;
+      state.loadedScale = 0;
+      state.loadedPage = 0;
       state.sourcePath =
         A.safeApiPath(doc?.presentation_url, ["/api/documents/", "/api/sources/"]) ||
         (doc?.status === "ready" && doc?.id
@@ -647,12 +770,44 @@
       loadOriginalPage(target, { scrollToHighlight: target === state.targetPage });
     });
 
+    // Keep the same spot of the page under the viewport centre while the page is rescaled.
+    function captureAnchor() {
+      if (state.mode !== "original" || !sourceViewport || !sourceOriginalCanvas) {
+        return null;
+      }
+      const vp = sourceViewport.getBoundingClientRect();
+      const c = sourceOriginalCanvas.getBoundingClientRect();
+      if (!c.width || !c.height) {
+        return null;
+      }
+      return {
+        fx: (vp.left + sourceViewport.clientWidth / 2 - c.left) / c.width,
+        fy: (vp.top + sourceViewport.clientHeight / 2 - c.top) / c.height,
+      };
+    }
+
+    function restoreAnchor(anchor) {
+      if (!anchor || !sourceViewport || !sourceOriginalCanvas) {
+        return;
+      }
+      const vp = sourceViewport.getBoundingClientRect();
+      const c = sourceOriginalCanvas.getBoundingClientRect();
+      const dx = c.left + anchor.fx * c.width - (vp.left + sourceViewport.clientWidth / 2);
+      const dy = c.top + anchor.fy * c.height - (vp.top + sourceViewport.clientHeight / 2);
+      if (Number.isFinite(dx) && Number.isFinite(dy)) {
+        sourceViewport.scrollLeft += dx;
+        sourceViewport.scrollTop += dy;
+      }
+    }
+
     function setZoom(nextZoom, fit = false) {
+      const anchor = captureAnchor();
       state.fitWidth = Boolean(fit);
-      state.zoom = Math.max(0.4, Math.min(2.5, Number(nextZoom) || 1.0));
+      state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(nextZoom) || 1.0));
       updateZoomLabel();
       applyCanvasSize();
       renderHighlightBoxes({ scrollIntoView: false });
+      restoreAnchor(anchor);
     }
 
     sourceZoomOut?.addEventListener("click", () => setZoom(state.zoom - 0.15, false));
@@ -660,12 +815,45 @@
     sourceZoomReset?.addEventListener("click", () => setZoom(1.0, false));
     sourceZoomFit?.addEventListener("click", () => setZoom(1.0, true));
 
-    window.addEventListener("resize", () => {
-      if (sourceDialog.open) {
+    // Ctrl/Cmd + wheel (and trackpad pinch) zooms the page, not the whole app.
+    sourceViewport?.addEventListener(
+      "wheel",
+      (event) => {
+        if (state.mode !== "original" || !(event.ctrlKey || event.metaKey)) {
+          return;
+        }
+        event.preventDefault();
+        setZoom(state.zoom * (event.deltaY < 0 ? 1.1 : 1 / 1.1), false);
+      },
+      { passive: false },
+    );
+
+    // Fit-to-width pages follow the dialog size; manual zoom keeps its scale. Boxes are
+    // percentages of the canvas, so only the canvas needs resizing.
+    let resizeFrame = 0;
+    function onViewportResize() {
+      if (!sourceDialog.open || state.mode !== "original") {
+        return;
+      }
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(() => {
+        const anchor = captureAnchor();
         applyCanvasSize();
         renderHighlightBoxes({ scrollIntoView: false });
-      }
-    });
+        restoreAnchor(anchor);
+      });
+    }
+    window.addEventListener("resize", onViewportResize);
+    if (typeof ResizeObserver === "function" && sourceViewport) {
+      let lastWidth = 0;
+      new ResizeObserver((entries) => {
+        const width = Math.round(entries[0]?.contentRect?.width || 0);
+        if (width !== lastWidth) {
+          lastWidth = width;
+          onViewportResize();
+        }
+      }).observe(sourceViewport);
+    }
 
     sourceFrame?.addEventListener("load", () => {
       if (sourceFrame.src && sourceFrame.src !== "about:blank") {
@@ -679,6 +867,9 @@
 
     sourceDialog.addEventListener("close", () => {
       state.openToken += 1;
+      state.loadedScale = 0;
+      state.loadedPage = 0;
+      window.clearTimeout(upgradeTimer);
       closeFrame();
       clearHighlights();
       if (sourceOriginalImage) {
