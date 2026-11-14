@@ -1,0 +1,64 @@
+<dialog id="source-dialog" class="dialog dialog--source dialog--fullscreen" aria-labelledby="source-title">
+  <div class="dialog__header source-dialog__header">
+    <div class="source-dialog__meta">
+      <p class="eyebrow">Просмотр источника</p>
+      <h2 id="source-title">Источник</h2>
+      <p id="source-locator" class="muted"></p>
+    </div>
+    <div class="source-dialog__top-actions">
+      <button type="button" class="button button--ghost button--compact" data-close-dialog>Закрыть (Esc)</button>
+      <button type="button" class="icon-button" data-close-dialog aria-label="Закрыть">×</button>
+    </div>
+  </div>
+
+  <blockquote id="source-quote" class="quote source-dialog__quote" hidden></blockquote>
+
+  <div class="source-toolbar" role="toolbar" aria-label="Управление просмотром источника">
+    <div class="source-toolbar__group">
+      <button type="button" id="source-presentation-btn" class="button button--ghost button--compact" hidden>Распознанный текст</button>
+      <a id="source-original" class="button button--secondary button--compact" target="_blank" rel="noopener" hidden>Открыть оригинал</a>
+      <a id="source-new-tab" class="button button--ghost button--compact" target="_blank" rel="noopener" hidden>Открыть представление</a>
+      <a id="source-download-original" class="button button--ghost button--compact" download hidden>Скачать оригинал</a>
+    </div>
+
+    <div id="source-page-controls" class="source-toolbar__group source-toolbar__pages" hidden>
+      <button type="button" id="source-prev-page" class="button button--ghost button--compact" aria-label="Предыдущая страница">← Пред.</button>
+      <label class="source-page-jump" for="source-page-input">
+        <span>Стр.</span>
+        <input id="source-page-input" type="number" min="1" value="1" aria-label="Номер страницы">
+        <span id="source-page-count" class="muted">из 1</span>
+      </label>
+      <button type="button" id="source-next-page" class="button button--ghost button--compact" aria-label="Следующая страница">След. →</button>
+    </div>
+
+    <div id="source-zoom-controls" class="source-toolbar__group source-toolbar__zoom" hidden>
+      <button type="button" id="source-zoom-out" class="button button--ghost button--compact" aria-label="Уменьшить масштаб">−</button>
+      <button type="button" id="source-zoom-reset" class="button button--ghost button--compact" title="Сбросить масштаб">100%</button>
+      <button type="button" id="source-zoom-in" class="button button--ghost button--compact" aria-label="Увеличить масштаб">+</button>
+      <button type="button" id="source-zoom-fit" class="button button--ghost button--compact">По ширине</button>
+    </div>
+  </div>
+
+  <div id="source-highlight-notice" class="callout callout--warning source-notice" role="status" hidden></div>
+  <p id="source-message" class="field-error" role="alert" hidden></p>
+
+  <div id="source-viewport" class="source-viewer-viewport">
+    <div id="source-original-stage" class="source-original-stage" hidden>
+      <div id="source-original-canvas" class="source-original-canvas">
+        <img id="source-original-image" class="source-original-image" alt="Страница оригинала документа" hidden>
+        <div id="source-highlight-layer" class="original-highlight-layer" aria-hidden="true"></div>
+      </div>
+      <div id="source-original-empty" class="empty-state" hidden></div>
+    </div>
+
+    <div id="source-frame-wrap" class="source-frame-wrap">
+      <iframe id="source-frame" class="source-frame" title="HTML-представление источника"
+              sandbox="" referrerpolicy="no-referrer" hidden></iframe>
+    </div>
+  </div>
+
+  <div class="dialog__actions source-dialog__footer">
+    <span id="source-footer-hint" class="muted"></span>
+    <button type="button" class="button button--primary" data-close-dialog>Закрыть</button>
+  </div>
+</dialog>

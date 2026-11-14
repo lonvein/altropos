@@ -814,4 +814,109 @@ def build_documents_router(state: SyntheticState) -> APIRouter:
             },
         )
 
+    @router.get("/documents/{document_id}/review")
+    async def get_review_demo(document_id: str) -> dict[str, Any]:
+        doc = state.documents.get(document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        frags = [f for f in state.fragments.values() if f.document_id == document_id]
+        blocks = [
+            {"index": i, "page": f.locator.get("page", 1), "text": f.text, "kind": "paragraph"}
+            for i, f in enumerate(frags)
+        ] or [{"index": 0, "page": 1, "text": f"Демонстрационное содержимое {doc.title}", "kind": "paragraph"}]
+        return {
+            "document": doc.public(),
+            "blocks": blocks,
+            "warnings": list(doc.warnings),
+            "review_history": [],
+            "original_info": {
+                "media_type": doc.media_type,
+                "page_count": 1,
+                "pages": [{"page": 1, "width": 595.0, "height": 842.0, "rotation": 0}],
+                "supports_bbox": doc.media_type == "pdf",
+            },
+        }
+
+    @router.post("/documents/{document_id}/review")
+    async def post_review_demo(document_id: str, request: Request) -> dict[str, Any]:
+        doc = state.documents.get(document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        payload = _json_body(await request.json())
+        decision = payload.get("decision", "approved")
+        if payload.get("action") == "reopen":
+            return await get_review_demo(document_id)
+        doc.metadata["reviewed"] = decision == "approved"
+        if decision in {"needs_review", "rejected"}:
+            doc.status = "needs_review"
+        elif doc.status != "ready":
+            doc.status = "ready"
+        return await get_review_demo(document_id)
+
+    @router.post("/documents/{document_id}/reocr")
+    async def post_reocr_demo(document_id: str) -> dict[str, Any]:
+        doc = state.documents.get(document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        job = _Job(
+            id=uuid4().hex,
+            kind="process_document",
+            created=time.monotonic(),
+            delay=0.05,
+            final_status="ready",
+            payload={"document_id": document_id},
+        )
+        state.jobs[job.id] = job
+        return {"document_id": document_id, "job_id": job.id, "status": "queued", "demo": True}
+
+    @router.get("/documents/{document_id}/original-info")
+    async def original_info_demo(document_id: str) -> dict[str, Any]:
+        doc = state.documents.get(document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        return {
+            "document_id": doc.id,
+            "title": doc.title,
+            "name": doc.name,
+            "download_url": f"/api/documents/{doc.id}/original",
+            "media_type": doc.media_type,
+            "page_count": 1,
+            "pages": [{"page": 1, "width": 595.0, "height": 842.0, "rotation": 0}],
+            "supports_bbox": doc.media_type == "pdf",
+        }
+
+    @router.get("/documents/{document_id}/original-page/{page_number}")
+    async def original_page_demo(document_id: str, page_number: int) -> Response:
+        doc = state.documents.get(document_id)
+        if doc is None or doc.media_type != "pdf" or page_number != 1:
+            raise HTTPException(status_code=404, detail="Страница недоступна.")
+        from navigator.documents.highlighting import render_original_pdf_page
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_pdf = Path(tmpdir) / "demo.pdf"
+            tmp_pdf.write_bytes(doc.content or b"")
+            png = render_original_pdf_page(tmp_pdf, 1)
+        return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    @router.get("/sources/{fragment_id}/highlight")
+    async def highlight_demo(fragment_id: str) -> dict[str, Any]:
+        frag = state.fragments.get(fragment_id)
+        if frag is None:
+            raise HTTPException(status_code=404, detail="Источник не найден.")
+        doc = state.documents[frag.document_id]
+        return {
+            "document_id": doc.id,
+            "fragment_id": frag.id,
+            "media_type": doc.media_type,
+            "page": int(frag.locator.get("page") or 1),
+            "page_count": 1,
+            "page_width": 595.0,
+            "page_height": 842.0,
+            "exact": False,
+            "boxes": [],
+            "notice": "В демонстрационном режиме точные координаты фрагмента не вычисляются.",
+            "title": doc.title,
+            "download_url": f"/api/documents/{doc.id}/original",
+        }
+
     return router

@@ -68,6 +68,9 @@
   let documents = [];
   let refreshTimer = null;
   let metadataDocument = null;
+  const sourceViewer = typeof A.createSourceViewer === "function" ? A.createSourceViewer() : null;
+  const selectedDocKey = "altropos.review.selectedDocumentId";
+  const lastReviewKey = "altropos.review.lastResult";
 
   function showFieldError(node, message) {
     A.setText(node, message);
@@ -245,9 +248,16 @@
       const sourceNode = fragment.querySelector(".document-card__source");
       const originalLink = fragment.querySelector(".document-card__original");
       const presentationLink = fragment.querySelector(".document-card__presentation");
+      const reviewButton = fragment.querySelector(".document-card__review");
+      const reocrButton = fragment.querySelector(".document-card__reocr");
       const metadataButton = fragment.querySelector(".document-card__metadata");
       const retryButton = fragment.querySelector(".document-card__retry");
       const root = fragment.querySelector(".document-card");
+
+      if (doc.id) {
+        root.id = `doc-${doc.id}`;
+        root.dataset.documentId = doc.id;
+      }
 
       const title = doc.title || doc.name || "Документ без названия";
       A.setText(titleNode, title);
@@ -306,6 +316,15 @@
       if (typeof doc.id === "string" && doc.id && doc.original_available !== false) {
         originalLink.href = `/api/documents/${encodeURIComponent(doc.id)}/original`;
         A.show(originalLink, true);
+        if (sourceViewer) {
+          originalLink.addEventListener("click", (event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+              return;
+            }
+            event.preventDefault();
+            sourceViewer.openDocumentViewer(doc, { startMode: "original" });
+          });
+        }
       } else {
         originalLink.removeAttribute("href");
         A.show(originalLink, false);
@@ -315,9 +334,57 @@
       if (href) {
         presentationLink.href = href;
         A.show(presentationLink, true);
+        if (sourceViewer) {
+          presentationLink.addEventListener("click", (event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+              return;
+            }
+            event.preventDefault();
+            sourceViewer.openDocumentViewer(doc, { startMode: "presentation" });
+          });
+        }
       } else {
         presentationLink.removeAttribute("href");
         A.show(presentationLink, false);
+      }
+
+      const isBusy = status === "queued" || status === "processing";
+      if (reviewButton && typeof doc.id === "string" && doc.id) {
+        reviewButton.disabled = isBusy;
+        A.setText(reviewButton, status === "ready" ? "Повторить проверку" : "Проверить распознавание");
+        reviewButton.addEventListener("click", () => {
+          saveDocumentsUiState();
+          try {
+            window.sessionStorage.setItem(
+              "altropos.review.returnUrl",
+              `${window.location.pathname}${window.location.search}#doc-${encodeURIComponent(doc.id)}`,
+            );
+            window.sessionStorage.setItem(selectedDocKey, doc.id);
+          } catch {
+            // Игнорируем ошибку sessionStorage.
+          }
+          window.location.assign(`/review?doc=${encodeURIComponent(doc.id)}`);
+        });
+      }
+
+      if (reocrButton && typeof doc.id === "string" && doc.id) {
+        reocrButton.disabled = isBusy;
+        reocrButton.addEventListener("click", async () => {
+          reocrButton.disabled = true;
+          A.setText(reocrButton, "Запуск OCR…");
+          try {
+            await A.apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/reocr`, {
+              method: "POST",
+              json: { reviewer: "Оператор", comment: "Повторный OCR со страницы документов" },
+            });
+            showDocumentsStatus("Повторный OCR поставлен в очередь. Оригинал и история подтверждений сохранены.");
+            await fetchDocuments({ silent: true });
+          } catch (error) {
+            A.setText(reocrButton, "Повторить OCR");
+            reocrButton.disabled = false;
+            showDocumentsStatus(A.friendlyError(error), true);
+          }
+        });
       }
 
       metadataButton.addEventListener("click", () => openMetadata(doc));
@@ -395,9 +462,31 @@
           }
         });
       }
-      if (!scrollRestored && parsed && typeof parsed.scrollY === "number" && parsed.scrollY > 0) {
+      if (!scrollRestored) {
         scrollRestored = true;
-        window.requestAnimationFrame(() => window.scrollTo(0, parsed.scrollY));
+        let selectedId = "";
+        try {
+          selectedId = window.sessionStorage.getItem(selectedDocKey) || "";
+          const lastReviewRaw = window.sessionStorage.getItem(lastReviewKey);
+          if (lastReviewRaw) {
+            const lastReview = JSON.parse(lastReviewRaw);
+            if (lastReview && lastReview.message) {
+              showDocumentsStatus(lastReview.message);
+            }
+          }
+        } catch {
+          selectedId = "";
+        }
+        const selectedEl = selectedId ? document.getElementById(`doc-${selectedId}`) : null;
+        if (selectedEl) {
+          document.querySelectorAll(".document-card--selected").forEach((el) => {
+            el.classList.remove("document-card--selected");
+          });
+          selectedEl.classList.add("document-card--selected");
+          window.requestAnimationFrame(() => selectedEl.scrollIntoView({ block: "center", behavior: "auto" }));
+        } else if (parsed && typeof parsed.scrollY === "number" && parsed.scrollY > 0) {
+          window.requestAnimationFrame(() => window.scrollTo(0, parsed.scrollY));
+        }
       }
     } catch {
       // Игнорируем ошибку sessionStorage.

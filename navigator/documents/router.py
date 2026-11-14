@@ -9,13 +9,33 @@ import asyncio
 import json
 
 from fastapi import APIRouter, File, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from pydantic import Field
 
+from navigator.documents.highlighting import (
+    get_original_info,
+    render_original_pdf_page,
+    resolve_fragment_highlight,
+)
 from navigator.documents.presentation import SOURCE_HEADERS, render_publication
 from navigator.documents.service import DocumentService, InitialCorpusReviewRequired
 from navigator.documents.snapshots import load_snapshot
 from navigator.ingestion.common import ParseError
-from navigator.schemas import Fragment, ImportRequest, MetadataPatch
+from navigator.schemas import Document, Fragment, ImportRequest, MetadataPatch, Schema
+
+
+class ReviewSubmitRequest(Schema):
+    action: str = "review"
+    decision: str = "approved"
+    reviewer: str = Field(default="Оператор", max_length=200)
+    comment: str = Field(default="", max_length=2000)
+    blocks: list[dict] | None = None
+    title: str | None = Field(default=None, max_length=500)
+
+
+class ReocrRequest(Schema):
+    reviewer: str = Field(default="Оператор", max_length=200)
+    comment: str = Field(default="", max_length=2000)
 
 
 def _error(code: str, message: str, status: int) -> JSONResponse:
@@ -145,6 +165,122 @@ def create_document_router(service: DocumentService | None = None) -> APIRouter:
                 return _error("not_ready", "Полный подтверждённый снимок недоступен. Откройте оригинал.", 409)
             return HTMLResponse(render_publication(row["title"], row["id"], fragments, fragment_id, blocks=blocks),
                                 headers=SOURCE_HEADERS)
+        return _error("not_found", "Опубликованный источник не найден.", 404)
+
+    @api.get("/documents/{document_id}/review")
+    def get_review(request: Request, document_id: str):
+        svc = current(request)
+        try:
+            return svc.get_review_detail(document_id)
+        except ValueError as exc:
+            return _error("not_found", str(exc) or "Документ не найден.", 404)
+
+    @api.post("/documents/{document_id}/review")
+    def post_review(request: Request, document_id: str, body: ReviewSubmitRequest):
+        svc = current(request)
+        if svc.get_document(document_id) is None:
+            return _error("not_found", "Документ не найден.", 404)
+        try:
+            if body.action == "reopen":
+                return svc.reopen_review(document_id, reviewer=body.reviewer, comment=body.comment)
+            return svc.submit_review(
+                document_id,
+                decision=body.decision,
+                reviewer=body.reviewer,
+                comment=body.comment,
+                corrected_blocks=body.blocks,
+                title=body.title,
+            )
+        except ValueError as exc:
+            return _error("invalid_request", str(exc) or "Не удалось сохранить результаты проверки.", 422)
+
+    @api.post("/documents/{document_id}/reocr")
+    async def post_reocr(request: Request, document_id: str, body: ReocrRequest | None = None):
+        svc = current(request)
+        if svc.get_document(document_id) is None:
+            return _error("not_found", "Документ не найден.", 404)
+        req_body = body or ReocrRequest()
+        try:
+            return await asyncio.to_thread(
+                svc.reocr_document,
+                document_id,
+                reviewer=req_body.reviewer,
+                comment=req_body.comment,
+            )
+        except ValueError as exc:
+            return _error("not_ready", str(exc) or "Не удалось запустить повторный OCR.", 409)
+
+    @api.get("/documents/{document_id}/original-info")
+    def original_info(request: Request, document_id: str):
+        svc = current(request)
+        row = svc.store.document(document_id)
+        if row is None:
+            return _error("not_found", "Документ не найден.", 404)
+        doc_rec = svc.get_document(document_id) or {}
+        try:
+            path = svc.storage.get_original_path(row["path"])
+        except (ValueError, OSError, FileNotFoundError):
+            return _error("not_found", "Оригинал недоступен.", 404)
+        media_type = doc_rec.get("media_type") or "pdf"
+        info = get_original_info(path, media_type)
+        return {
+            "document_id": document_id,
+            "title": row["title"],
+            "name": row["name"],
+            "download_url": f"/api/documents/{document_id}/original",
+            **info,
+        }
+
+    @api.get("/documents/{document_id}/original-page/{page_number}")
+    def original_page(request: Request, document_id: str, page_number: int, scale: float = 1.75):
+        svc = current(request)
+        row = svc.store.document(document_id)
+        if row is None:
+            return _error("not_found", "Документ не найден.", 404)
+        doc_rec = svc.get_document(document_id) or {}
+        media_type = doc_rec.get("media_type") or "pdf"
+        if media_type != "pdf":
+            return _error("not_found", "Постраничное изображение доступно только для PDF-оригинала.", 404)
+        try:
+            path = svc.storage.get_original_path(row["path"])
+            clamped_scale = max(0.5, min(3.5, float(scale)))
+            png_bytes = render_original_pdf_page(path, page_number, scale=clamped_scale)
+        except ValueError as exc:
+            return _error("not_found", str(exc) or "Страница не найдена.", 404)
+        except (OSError, FileNotFoundError):
+            return _error("not_found", "Оригинал недоступен.", 404)
+        return Response(
+            content=png_bytes,
+            media_type="image/png",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+        )
+
+    @api.get("/sources/{fragment_id}/highlight")
+    def source_highlight(request: Request, fragment_id: str, quote: str | None = None):
+        svc = current(request)
+        rows = svc.store.rows(
+            """SELECT d.id,d.title,d.sha,d.path,d.payload,p.manifest,p.fragments FROM documents d
+            JOIN publications p ON p.id=d.active_publication WHERE d.status='ready'"""
+        )
+        for row in rows:
+            data = json.loads(row["fragments"])
+            if not any(item["id"] == fragment_id for item in data):
+                continue
+            fragments = [Fragment.model_validate(item) for item in data]
+            target = next(f for f in fragments if f.id == fragment_id)
+            try:
+                blocks = load_snapshot(svc, row, fragments)
+            except (ValueError, OSError, KeyError, TypeError):
+                return _error("not_ready", "Полный подтверждённый снимок недоступен.", 409)
+            try:
+                orig_path = svc.storage.get_original_path(row["path"])
+            except (ValueError, OSError, FileNotFoundError):
+                orig_path = None
+            document = Document.model_validate_json(row["payload"])
+            result = resolve_fragment_highlight(orig_path, document.media_type, target, blocks, quote=quote)
+            result["title"] = row["title"]
+            result["download_url"] = f"/api/documents/{row['id']}/original"
+            return result
         return _error("not_found", "Опубликованный источник не найден.", 404)
 
     return api

@@ -185,30 +185,24 @@ def create_app(
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "font-src 'self' data:; "
+        "connect-src 'self'; "
         "base-uri 'none'; "
         "form-action 'none'"
     )
 
     @app.get("/review")
-    def review_page():
-        if not (settings.review_dir / "index.html").is_file():
-            return HTMLResponse(
-                "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
-                "<title>Проверка распознавания</title>"
-                "<style>body{font:16px system-ui;margin:2rem}"
-                ".review-nav{margin-bottom:1.25rem}"
-                ".review-back{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .9rem;"
-                "border:1px solid #888;border-radius:6px;text-decoration:none;color:inherit;font:inherit;cursor:pointer;background:transparent}"
-                "</style></head><body>"
-                "<nav class='review-nav' aria-label='Навигация'>"
-                "<a href='/documents' class='review-back' data-review-back data-review-scope='index' data-back-fallback='/documents'>← Назад</a>"
-                "</nav>"
-                "<h1>Пакеты проверки ещё не подготовлены</h1>"
-                "<p>До одобрения документы не публикуются в поиске.</p>"
-                "<script src='/static/js/review-nav.js' defer></script>"
-                "</body></html>"
-            )
-        return RedirectResponse("/review-files/index.html")
+    def review_page(request: Request, doc: str = ""):
+        has_static = (settings.review_dir / "index.html").is_file()
+        if has_static and not doc.strip():
+            return RedirectResponse("/review-files/index.html")
+        return templates.TemplateResponse(
+            request=request,
+            name="review.html",
+            context={
+                "selected_doc_id": doc.strip(),
+                "has_static_packages": has_static,
+            },
+        )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):

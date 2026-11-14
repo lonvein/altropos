@@ -146,25 +146,28 @@ class Indexer:
         digest = fragments_digest(fragments)
         hybrid = self.settings.ml_enabled and self.embeddings is not None
         # Reuse an active compatible publication. Explicitly enabled ML upgrades BM25.
+        old = None
+        manifest = None
         if row["active_publication"]:
             old = self.store.rows("SELECT manifest,result FROM publications WHERE id=?",
                                   (row["active_publication"],))[0]
             manifest = IndexManifest.model_validate_json(old["manifest"])
-            if manifest.fragments_sha256 != digest:
-                raise component_error("invalid_request", "Изменение фрагментов требует новой версии документа.")
-            if row["status"] == "ready" and ((hybrid and manifest.mode == "hybrid" and
-                    manifest.embedding_fingerprint == self.settings.fingerprint) or
-                    (not hybrid and manifest.mode == "bm25")):
-                validate_lexical(self.store, manifest, fragments)
-                if hybrid:
-                    try:
-                        load_vectors(self.store, manifest, fragments)
-                    except ImportError:
-                        pass  # Rebuild a vector-free publication below if FAISS was removed.
+            if manifest.document_version == document.version:
+                if manifest.fragments_sha256 != digest:
+                    raise component_error("invalid_request", "Изменение фрагментов требует новой версии документа.")
+                if row["status"] == "ready" and ((hybrid and manifest.mode == "hybrid" and
+                        manifest.embedding_fingerprint == self.settings.fingerprint) or
+                        (not hybrid and manifest.mode == "bm25")):
+                    validate_lexical(self.store, manifest, fragments)
+                    if hybrid:
+                        try:
+                            load_vectors(self.store, manifest, fragments)
+                        except ImportError:
+                            pass  # Rebuild a vector-free publication below if FAISS was removed.
+                        else:
+                            return IndexResult.model_validate_json(old["result"])
                     else:
                         return IndexResult.model_validate_json(old["result"])
-                else:
-                    return IndexResult.model_validate_json(old["result"])
         warnings = []
         vector_data = None
         if hybrid:
@@ -185,7 +188,8 @@ class Indexer:
         mode = "hybrid" if vector_data is not None else "bm25"
         if mode == "bm25":
             warnings.append(BM25_WARNING)
-            if row["status"] == "ready" and row["active_publication"] and manifest.mode == "bm25":
+            if (row["status"] == "ready" and old is not None and manifest is not None
+                    and manifest.document_version == document.version and manifest.mode == "bm25"):
                 validate_lexical(self.store, manifest, fragments)
                 return IndexResult.model_validate_json(old["result"])
         publication_id = uuid4().hex

@@ -69,8 +69,10 @@ def document_ids(sha256: str) -> tuple[str, str]:
     return f"doc-{sha256[:16]}", "v1"
 
 
-def fragment_id(document_id: str, ordinal: int) -> str:
-    return f"{document_id}-f{ordinal:04d}"
+def fragment_id(document_id: str, ordinal: int, document_version: str = "v1") -> str:
+    if not document_version or document_version == "v1" or document_version.startswith("v-"):
+        return f"{document_id}-f{ordinal:04d}"
+    return f"{document_id}-{document_version}-f{ordinal:04d}"
 
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?;:])\s+(?=[А-ЯЁA-Z«\"(\d•\-])")
@@ -120,7 +122,7 @@ def _cell_bounds(rng: str) -> tuple[int, int, int, int]:
 
 
 def merge_locators(locators: list[dict]) -> dict:
-    """Локатор фрагмента из локаторов его строк: для XLSX — объемлющий диапазон."""
+    """Локатор фрагмента из локаторов его строк/абзацев."""
     first = dict(locators[0])
     if first.get("kind") == "xlsx" and len(locators) > 1:
         from openpyxl.utils import get_column_letter
@@ -130,6 +132,18 @@ def merge_locators(locators: list[dict]) -> dict:
         c1, r1 = max(b[2] for b in bounds), max(b[3] for b in bounds)
         a, b = f"{get_column_letter(c0)}{r0}", f"{get_column_letter(c1)}{r1}"
         first["range"] = a if a == b else f"{a}:{b}"
+    elif first.get("kind") == "pdf" and len(locators) > 1:
+        boxes = [
+            loc["bbox"] for loc in locators
+            if loc.get("kind") == "pdf" and loc.get("page") == first.get("page") and loc.get("bbox")
+        ]
+        if boxes:
+            first["bbox"] = [
+                round(min(b[0] for b in boxes), 1),
+                round(min(b[1] for b in boxes), 1),
+                round(max(b[2] for b in boxes), 1),
+                round(max(b[3] for b in boxes), 1),
+            ]
     return first
 
 
@@ -152,7 +166,8 @@ def _build_fragments(units: list[Unit]) -> list[FragmentDraft]:
         body = "\n".join(u.text for _, u in buffer)
         text = f"{header}\n{body}" if header else body
         section = first.section or next((u.section for _, u in buffer if u.section), "")
-        drafts.append(FragmentDraft(text=text, section=section, locator=dict(first.locator),
+        drafts.append(FragmentDraft(text=text, section=section,
+                                    locator=merge_locators([u.locator for _, u in buffer]),
                                     units=[i for i, _ in buffer]))
         buffer.clear()
 
@@ -282,7 +297,7 @@ def _table_drafts(index: int, unit: Unit) -> list[FragmentDraft]:
 def to_fragments(document_id: str, document_version: str, drafts: list[FragmentDraft]) -> list[Fragment]:
     """Присваивает стабильные ID и ordinal по порядку. Locator-словарь содержит `kind`."""
     return [
-        Fragment(id=fragment_id(document_id, ordinal), document_id=document_id,
+        Fragment(id=fragment_id(document_id, ordinal, document_version), document_id=document_id,
                  document_version=document_version, ordinal=ordinal, text=draft.text,
                  section=draft.section, locator=draft.locator)
         for ordinal, draft in enumerate(drafts)

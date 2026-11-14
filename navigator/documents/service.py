@@ -19,10 +19,11 @@ from navigator.documents.site_importer import (
 )
 from navigator.documents.storage import DocumentStorage
 from navigator.ingestion import parse_file
-from navigator.ingestion.common import ParseError, document_ids, sha256_bytes, to_fragments
+from navigator.ingestion.common import ParseError, Unit, document_ids, sha256_bytes, to_fragments
 from navigator.ingestion.metadata_extractor import extract_metadata
+from navigator.ingestion.model import Parsed
 from navigator.interfaces import Indexer
-from navigator.schemas import Document, MetadataPatch, Relation
+from navigator.schemas import Document, Fragment, MetadataPatch, Relation
 
 logger = logging.getLogger(__name__)
 
@@ -188,9 +189,12 @@ class DocumentService:
         previous_doc: Document | None = None
         if registered.get("payload"):
             previous_doc = Document.model_validate_json(registered["payload"])
+            prev_meta = previous_doc.metadata.model_dump(exclude_none=True)
+            if payload.get("reocr"):
+                prev_meta.pop("reviewed", None)
             meta = MetadataPatch.model_validate({
                 **meta.model_dump(),
-                **previous_doc.metadata.model_dump(exclude_none=True),
+                **prev_meta,
             })
         title = (meta.title or parsed.title or Path(filename).stem)[:500]
         if title == Path(rel_path).stem:
@@ -412,6 +416,358 @@ class DocumentService:
             processed += 1
         return processed
 
+    @staticmethod
+    def _next_version(current_version: str | None) -> str:
+        raw = (current_version or "v1").strip()
+        match = re.fullmatch(r"v(\d+)", raw)
+        if match:
+            return f"v{int(match[1]) + 1}"
+        rmatch = re.fullmatch(r"(.+?)-r(\d+)", raw)
+        if rmatch:
+            return f"{rmatch[1]}-r{int(rmatch[2]) + 1}"
+        return f"{raw}-r2" if len(raw) < 120 else "v2"
+
+    @staticmethod
+    def _blocks_to_units(blocks: list[dict], media_type: str) -> list[Unit]:
+        units: list[Unit] = []
+        for idx, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            loc: dict = {"kind": media_type}
+            if media_type == "pdf":
+                loc["page"] = max(1, int(block.get("page") or 1))
+                if block.get("bbox"):
+                    loc["bbox"] = list(block["bbox"])
+            elif media_type in {"docx", "html"}:
+                loc["block"] = max(0, int(block.get("index", idx)))
+            elif media_type == "xlsx":
+                loc["sheet"] = str(block.get("sheet") or "Лист1")
+                loc["range"] = str(block.get("range") or "A1")
+
+            rows_data = block.get("table", block.get("rows"))
+            if rows_data and isinstance(rows_data, list):
+                if media_type == "xlsx" and rows_data and isinstance(rows_data[0], dict):
+                    row_texts = [
+                        " | ".join(
+                            str(c.get("text") if c.get("text") is not None else c.get("cached", ""))
+                            for c in r.get("cells", [])
+                        )
+                        for r in rows_data
+                    ]
+                else:
+                    row_texts = [" | ".join(str(c) for c in r) for r in rows_data if isinstance(r, list)]
+                row_texts = [t for t in row_texts if t.strip()]
+                if row_texts:
+                    header = row_texts[0]
+                    body_rows = row_texts[1:] if len(row_texts) > 1 else row_texts
+                    units.append(
+                        Unit(
+                            text="\n".join(row_texts),
+                            locator=loc,
+                            kind="table",
+                            section=str(block.get("section") or ""),
+                            table_header=header,
+                            rows=body_rows,
+                        )
+                    )
+                continue
+
+            text = str(block.get("text") or "").strip()
+            if text:
+                units.append(
+                    Unit(
+                        text=text,
+                        locator=loc,
+                        section=str(block.get("section") or ""),
+                        kind=str(block.get("kind") or "paragraph"),
+                        atomic=len(text) < 900,
+                    )
+                )
+        return units
+
+    def _record_review_event(
+        self,
+        doc_id: str,
+        *,
+        version: str,
+        action: str,
+        decision: str | None = None,
+        reviewer: str | None = None,
+        comment: str = "",
+        con=None,
+    ) -> None:
+        args = (doc_id, version, action, decision, (reviewer or "").strip() or None, comment or "")
+        sql = (
+            "INSERT INTO document_reviews(document_id, version, action, decision, reviewer, comment) "
+            "VALUES(?, ?, ?, ?, ?, ?)"
+        )
+        if con is not None:
+            con.execute(sql, args)
+        else:
+            self.store.execute(sql, args)
+
+    def _review_history(self, doc_id: str) -> list[dict]:
+        rows = self.store.rows(
+            "SELECT id, version, action, decision, reviewer, comment, created "
+            "FROM document_reviews WHERE document_id=? ORDER BY id ASC",
+            (doc_id,),
+        )
+        return [
+            {
+                "id": r["id"],
+                "version": r["version"],
+                "action": r["action"],
+                "decision": r["decision"],
+                "reviewer": r["reviewer"],
+                "comment": r["comment"] or "",
+                "created": r["created"],
+            }
+            for r in rows
+        ]
+
+    def get_review_detail(self, doc_id: str) -> dict:
+        """Возвращает состояние и блоки документа для проверки (включая статус ready)."""
+        row = self.store.document(doc_id)
+        if row is None:
+            raise ValueError("Документ не найден")
+        record = self._format_doc_record(row)
+        record.pop("original_path", None)
+
+        blocks: list[dict] | None = None
+        if row.get("active_publication"):
+            pub_rows = self.store.rows(
+                "SELECT manifest, fragments FROM publications WHERE id=?",
+                (row["active_publication"],),
+            )
+            if pub_rows:
+                try:
+                    from navigator.documents.snapshots import load_snapshot
+                    frags = [Fragment.model_validate(f) for f in json.loads(pub_rows[0]["fragments"])]
+                    blocks = load_snapshot(self, {**row, **pub_rows[0]}, frags)
+                except Exception:
+                    blocks = None
+        if blocks is None:
+            blocks = self.storage.get_extracted_blocks(doc_id) or []
+
+        from navigator.documents.highlighting import get_original_info
+        orig_path = None
+        try:
+            orig_path = self.storage.get_original_path(row["path"])
+        except Exception:
+            orig_path = None
+        original_info = get_original_info(orig_path, record.get("media_type") or "pdf")
+
+        return {
+            "document": record,
+            "blocks": blocks,
+            "warnings": record.get("warnings", []),
+            "review_history": self._review_history(doc_id),
+            "original_info": original_info,
+        }
+
+    def reopen_review(self, doc_id: str, *, reviewer: str = "Оператор", comment: str = "") -> dict:
+        """Повторно открывает проверку любого документа (включая ready/подтверждённые)."""
+        row = self.store.document(doc_id)
+        if row is None or not row["payload"]:
+            raise ValueError("Документ не найден")
+        doc = Document.model_validate_json(row["payload"])
+        self._record_review_event(
+            doc_id,
+            version=doc.version,
+            action="reopen_review",
+            decision="pending",
+            reviewer=reviewer,
+            comment=comment,
+        )
+        return self.get_review_detail(doc_id)
+
+    def submit_review(
+        self,
+        doc_id: str,
+        *,
+        decision: str,
+        reviewer: str = "Оператор",
+        comment: str = "",
+        corrected_blocks: list[dict] | None = None,
+        title: str | None = None,
+    ) -> dict:
+        """Сохраняет результаты проверки/правки распознавания без повторного OCR."""
+        if decision not in {"approved", "needs_review", "rejected"}:
+            raise ValueError("Допустимые решения: approved, needs_review, rejected")
+        clean_reviewer = (reviewer or "").strip() or "Оператор"
+
+        row = self.store.document(doc_id)
+        if row is None or not row["payload"]:
+            raise ValueError("Документ не найден")
+        if row["status"] == "processing":
+            raise ValueError("Дождитесь окончания текущей обработки документа")
+
+        doc = Document.model_validate_json(row["payload"])
+        meta = doc.metadata.model_copy()
+        new_title = (title.strip()[:500] if title and title.strip() else doc.title)
+        meta = meta.model_copy(update={"title": new_title, "reviewed": decision == "approved"})
+
+        has_edits = corrected_blocks is not None
+        if has_edits:
+            if not isinstance(corrected_blocks, list):
+                raise ValueError("Некорректный формат блоков распознавания")
+            doc.version = self._next_version(doc.version)
+            blocks = corrected_blocks
+            self.storage.save_extracted_blocks(doc_id, blocks)
+        else:
+            blocks = self.storage.get_extracted_blocks(doc_id)
+            if blocks is None and row.get("active_publication"):
+                pub_rows = self.store.rows("SELECT manifest, fragments FROM publications WHERE id=?", (row["active_publication"],))
+                if pub_rows:
+                    try:
+                        from navigator.documents.snapshots import load_snapshot
+                        frags = [Fragment.model_validate(f) for f in json.loads(pub_rows[0]["fragments"])]
+                        blocks = load_snapshot(self, {**row, **pub_rows[0]}, frags)
+                    except Exception:
+                        blocks = []
+            blocks = blocks or []
+
+        if decision in {"needs_review", "rejected"}:
+            doc.title = new_title
+            doc.metadata = meta
+            doc.status = "needs_review"
+            self.store.execute(
+                "UPDATE documents SET title=?, metadata=?, payload=?, status='needs_review' WHERE id=?",
+                (doc.title, meta.model_dump_json(), doc.model_dump_json(), doc_id),
+            )
+            self._record_review_event(
+                doc_id,
+                version=doc.version,
+                action="edit_results" if has_edits else "review",
+                decision=decision,
+                reviewer=clean_reviewer,
+                comment=comment,
+            )
+            return self.get_review_detail(doc_id)
+
+        # decision == "approved"
+        if not has_edits and row["status"] == "ready" and row.get("active_publication"):
+            doc.title = new_title
+            doc.metadata = meta
+            doc.status = "ready"
+            self.store.execute(
+                "UPDATE documents SET title=?, metadata=?, payload=? WHERE id=?",
+                (doc.title, meta.model_dump_json(), doc.model_dump_json(), doc_id),
+            )
+            self._record_review_event(
+                doc_id,
+                version=doc.version,
+                action="review",
+                decision="approved",
+                reviewer=clean_reviewer,
+                comment=comment,
+            )
+            return self.get_review_detail(doc_id)
+
+        units = self._blocks_to_units(blocks, doc.media_type)
+        if not units:
+            raise ValueError("Невозможно подтвердить документ без текстовых блоков")
+
+        drafts = Parsed(
+            media_type=doc.media_type,
+            title=new_title,
+            units=units,
+            blocks=blocks,
+        ).build()
+        fragments = to_fragments(doc_id, doc.version, drafts)
+        if not fragments:
+            raise ValueError("Невозможно подтвердить документ без фрагментов текста")
+
+        # Avoid version collision if snapshot or publication for doc.version already exists with other content.
+        existing_snap = self.store.rows(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='presentation_snapshots'",
+        )
+        if existing_snap:
+            snap_row = self.store.rows(
+                "SELECT version FROM presentation_snapshots WHERE document_id=? AND version=?",
+                (doc_id, doc.version),
+            )
+            if snap_row and not has_edits:
+                doc.version = self._next_version(doc.version)
+                fragments = to_fragments(doc_id, doc.version, drafts)
+
+        doc.title = new_title
+        doc.metadata = meta
+        doc.warnings = []
+        doc.status = "processing"
+        self.store.execute(
+            "UPDATE documents SET title=?, metadata=?, payload=?, status='processing' WHERE id=?",
+            (doc.title, meta.model_dump_json(), doc.model_dump_json(), doc_id),
+        )
+        from navigator.documents.snapshots import save_snapshot
+        save_snapshot(self.store, doc, fragments, blocks)
+        self.indexer.index_document(doc_id, fragments)
+        self.store.execute(
+            "UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?",
+            (doc_id,),
+        )
+        self._record_review_event(
+            doc_id,
+            version=doc.version,
+            action="edit_results" if has_edits else "review",
+            decision="approved",
+            reviewer=clean_reviewer,
+            comment=comment,
+        )
+        return self.get_review_detail(doc_id)
+
+    def reocr_document(
+        self,
+        doc_id: str,
+        *,
+        reviewer: str = "Оператор",
+        comment: str = "",
+    ) -> dict:
+        """Запускает повторный OCR исходного файла (включая ready/подтверждённые документы)."""
+        from uuid import uuid4
+
+        with self.store.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+            if row is None or not row["payload"]:
+                raise ValueError("Документ не найден")
+            if row["status"] == "processing":
+                raise ValueError("Дождитесь окончания текущей обработки документа")
+            doc = Document.model_validate_json(row["payload"])
+            full_path = self.storage.get_original_path(doc.original_path)
+            if sha256_bytes(full_path.read_bytes()) != row["sha"]:
+                raise ValueError("Оригинал документа не совпадает с контрольной суммой")
+            new_version = self._next_version(doc.version)
+            doc.version = new_version
+            doc.status = "queued"
+            job_id = uuid4().hex
+            payload = {
+                "document_id": doc.id,
+                "version": new_version,
+                "filename": doc.name,
+                "rel_path": doc.original_path,
+                "media_type": doc.media_type,
+                "reocr": True,
+            }
+            con.execute(
+                "UPDATE documents SET status='queued', payload=? WHERE id=?",
+                (doc.model_dump_json(), doc_id),
+            )
+            con.execute(
+                "INSERT INTO jobs(id, kind, payload) VALUES(?, ?, ?)",
+                (job_id, "process_file", json.dumps(payload, ensure_ascii=False)),
+            )
+            self._record_review_event(
+                doc_id,
+                version=new_version,
+                action="reocr",
+                decision="queued",
+                reviewer=reviewer,
+                comment=comment,
+                con=con,
+            )
+        return {"document_id": doc_id, "job_id": job_id, "version": new_version, "status": "queued"}
+
     def retry_document(self, doc_id: str) -> dict:
         """Reprocess unchanged bytes without pretending metadata was reviewed."""
         from uuid import uuid4
@@ -591,6 +947,7 @@ class DocumentService:
             "retrieved_at": retrieved_at,
             "media_type": media_type,
             "version": version,
+            "review_history": self._review_history(row["id"]),
             "created": row.get("created"),
             "original_path": row.get("path"),
         }

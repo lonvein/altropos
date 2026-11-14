@@ -24,7 +24,7 @@ def _table(store):
 
 
 def save_snapshot(store, document: Document, fragments, blocks):
-    """Stage canonical content before publication; never overwrite a version."""
+    """Stage canonical content before publication; preserve existing versions."""
     if not fragments or any((f.document_id, f.document_version) != (document.id, document.version)
                             for f in fragments):
         raise ValueError("Presentation version differs from fragments")
@@ -34,6 +34,18 @@ def save_snapshot(store, document: Document, fragments, blocks):
     values = (*key, document.sha256, data, digest)
     _table(store)
     with store.connect() as con:
+        existing_for_version = con.execute(
+            "SELECT source_sha,blocks,blocks_sha,fragments_sha FROM presentation_snapshots "
+            "WHERE document_id=? AND version=?",
+            (document.id, document.version),
+        ).fetchone()
+        if existing_for_version is not None and tuple(existing_for_version) != (
+            document.sha256,
+            data,
+            digest,
+            key[2],
+        ):
+            raise ValueError("Changed canonical content requires a new extraction version")
         con.execute("INSERT OR IGNORE INTO presentation_snapshots VALUES(?,?,?,?,?,?)", values)
         row = con.execute("SELECT source_sha,blocks,blocks_sha FROM presentation_snapshots "
                           "WHERE document_id=? AND version=? AND fragments_sha=?", key).fetchone()

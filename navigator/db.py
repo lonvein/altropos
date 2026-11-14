@@ -40,6 +40,16 @@ class Store:
             CREATE TABLE IF NOT EXISTS publications (
               id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id),
               manifest TEXT NOT NULL, fragments TEXT NOT NULL, result TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS document_reviews (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              document_id TEXT NOT NULL REFERENCES documents(id),
+              version TEXT NOT NULL,
+              action TEXT NOT NULL,
+              decision TEXT,
+              reviewer TEXT,
+              comment TEXT DEFAULT '',
+              created TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE INDEX IF NOT EXISTS doc_reviews_idx ON document_reviews(document_id, id);
             """)
             # Additive migration of the initial local scaffold; never drop user data.
             columns = {row[1] for row in con.execute("PRAGMA table_info(documents)")}
@@ -167,7 +177,10 @@ class Store:
             for historical in con.execute("SELECT fragments FROM publications WHERE document_id=?",
                                           (manifest.document_id,)):
                 old_fragments = [Fragment.model_validate(f) for f in json.loads(historical["fragments"])]
-                if fragments_digest(old_fragments) != manifest.fragments_sha256:
+                old_versions = {f.document_version for f in old_fragments}
+                same_version = manifest.document_version in old_versions
+                id_collision = bool({f.id for f in old_fragments} & {f.id for f in ordered})
+                if (same_version or id_collision) and fragments_digest(old_fragments) != manifest.fragments_sha256:
                     raise ValueError("Changed fragments require a new document version and ID")
             con.execute("INSERT INTO publications VALUES(?,?,?,?,?)",
                         (manifest.publication_id, manifest.document_id, manifest.model_dump_json(),

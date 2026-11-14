@@ -199,6 +199,8 @@
   </form>
 </dialog>
 
+{% include "_source_dialog.html" %}
+
 <template id="document-template">
   <li class="document-card">
     <div class="document-card__head">
@@ -224,6 +226,8 @@
     <div class="document-card__actions">
       <a class="button button--secondary document-card__original" target="_blank" rel="noopener">Оригинал</a>
       <a class="button button--ghost document-card__presentation" target="_blank" rel="noopener" hidden>Полный текст</a>
+      <button type="button" class="button button--secondary document-card__review">Проверить распознавание</button>
+      <button type="button" class="button button--ghost document-card__reocr">Повторить OCR</button>
       <button type="button" class="button button--primary document-card__metadata">Метаданные</button>
       <button type="button" class="button button--secondary document-card__retry" hidden>Повторить обработку</button>
     </div>
@@ -272,5 +276,6 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/source-viewer.js" defer></script>
 <script src="/static/js/documents.js" defer></script>
 {% endblock %}

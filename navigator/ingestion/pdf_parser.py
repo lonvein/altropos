@@ -258,6 +258,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
             except Exception:
                 native_text = ""
                 diag["warnings"].append("Ошибка чтения текстового слоя")
+            page_dims = [round(float(page.width), 1), round(float(page.height), 1)]
             raster_body = _image_dominant(page)
             if len(native_text) < MIN_PAGE_CHARS or _broken_encoding(native_text) or raster_body:
                 result = _ocr_page(page, number, ocr)
@@ -274,8 +275,17 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     continue
                 ocr_pages.append(number)
                 for item in result:
+                    raw_lines = item.get("lines") or []
+                    norm_lines = []
+                    for ln in raw_lines:
+                        if not isinstance(ln, dict):
+                            continue
+                        lbox = _bbox(ln["bbox"], page) if ln.get("bbox") else None
+                        if lbox:
+                            norm_lines.append({"text": ln.get("text", ""), "bbox": lbox})
                     if item.get("suspected_rule"):
                         blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
+                                       "lines": norm_lines, "page_size": page_dims,
                                        "ocr": True, "kind": "ocr_artifact", "suspected_rule": True})
                         diag["needs_review"] = True
                         continue
@@ -289,7 +299,9 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                         if old and new:
                             previous.locator["bbox"] = [min(old[0],new[0]),min(old[1],new[1]),
                                                         max(old[2],new[2]),max(old[3],new[3])]
-                        previous_block.update(text=previous.text, bbox=previous.locator.get("bbox"))
+                        merged_lines = list(previous_block.get("lines") or []) + norm_lines
+                        previous_block.update(text=previous.text, bbox=previous.locator.get("bbox"),
+                                              lines=merged_lines, page_size=page_dims)
                         continue
                     box = item.get("bbox")
                     is_note = bool(item.get("note"))
@@ -300,7 +312,8 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     units.append(Unit(text=item["text"], locator=loc, section=info.section if info else "",
                                       path=info.path if info else outline.path,
                                       kind=info.kind if info else "note", atomic=len(item["text"]) < 900))
-                    blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"), "ocr": True,
+                    blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
+                                   "lines": norm_lines, "page_size": page_dims, "ocr": True,
                                    "conf": item.get("conf"), "reference_markers": item.get("reference_markers", []),
                                    "kind": "note" if is_note else info.kind,
                                    "list_item": bool(item.get("list_item")), "raw_text": item.get("raw_text", item["text"]),
@@ -348,12 +361,18 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     box = _bbox(_union(para), page)
                     if box:
                         loc["bbox"] = box
+                    para_lines = []
+                    for pline in para:
+                        lbox = _bbox((pline["x0"], pline["top"], pline["x1"], pline["bottom"]), page)
+                        if lbox:
+                            para_lines.append({"text": pline["text"], "bbox": lbox})
                     if info is None:  # сноска сохраняется и связывается после разбора страницы
                         units.append(Unit(text=text, locator=loc, path=outline.path, kind="note", atomic=True))
                     else:
                         units.append(Unit(text=text, locator=loc, section=info.section, path=info.path,
                                           kind=info.kind, atomic=len(text) < 900))
-                    blocks.append({"page": number, "text": text, "bbox": box})
+                    blocks.append({"page": number, "text": text, "bbox": box,
+                                   "lines": para_lines, "page_size": page_dims})
                 else:
                     table, data = payload
                     rows = [[_clean((c or "").replace("\n", " ")) for c in r] for r in data]
@@ -366,7 +385,7 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                     body = [" | ".join(r) for r in rows[1:]]
                     units.append(Unit(text="\n".join(" | ".join(r) for r in rows), locator=loc, kind="table",
                                       path=outline.path, table_header=header, rows=body))
-                    blocks.append({"page": number, "table": rows, "bbox": box})
+                    blocks.append({"page": number, "table": rows, "bbox": box, "page_size": page_dims})
     finally:
         pdf.close()
 

@@ -41,6 +41,7 @@
   const metaVerification = document.getElementById("meta-verification");
   const metaTimings = document.getElementById("meta-timings");
 
+  const sourceViewer = typeof A.createSourceViewer === "function" ? A.createSourceViewer() : null;
   const sourceDialog = document.getElementById("source-dialog");
   const sourceTitle = document.getElementById("source-title");
   const sourceLocator = document.getElementById("source-locator");
@@ -376,72 +377,23 @@
     A.show(answerRegion, true);
   }
 
-  function closeSourceFrame() {
-    if (sourceFrame) {
-      sourceFrame.src = "about:blank";
-      A.show(sourceFrame, false);
-    }
-  }
-
   function openSource(source, quote) {
+    if (sourceViewer) {
+      sourceViewer.openCitation({ source, quote });
+      return;
+    }
     A.setText(sourceTitle, source.title || "Источник");
     A.setText(sourceLocator, A.formatLocator(source.locator) || "Адрес фрагмента не указан");
     A.setText(sourceQuote, quote || "Дословная цитата не передана сервером.");
     A.setText(sourceMessage, "");
     A.show(sourceMessage, false);
-
-    const documentId = source.document_id;
-    if (typeof documentId === "string" && documentId) {
-      let href = `/api/documents/${encodeURIComponent(documentId)}/original`;
-      if (
-        source.locator &&
-        source.locator.kind === "pdf" &&
-        Number(source.locator.page) > 0
-      ) {
-        href += `#page=${encodeURIComponent(String(source.locator.page))}`;
-      }
-      sourceOriginal.href = href;
-      A.show(sourceOriginal, true);
-    } else {
-      sourceOriginal.removeAttribute("href");
-      A.show(sourceOriginal, false);
-    }
-
     const sourcePath = A.safeApiPath(source.url, ["/api/sources/"]);
-    if (sourcePath) {
-      sourceNewTab.href = sourcePath;
-      A.show(sourceNewTab, true);
+    if (sourcePath && sourceFrame) {
       sourceFrame.src = sourcePath;
       A.show(sourceFrame, true);
-    } else {
-      sourceNewTab.removeAttribute("href");
-      A.show(sourceNewTab, false);
-      closeSourceFrame();
-      A.setText(
-        sourceMessage,
-        "Сервер не передал корректную ссылку на HTML-представление источника.",
-      );
-      A.show(sourceMessage, true);
     }
-
     A.openDialog(sourceDialog);
   }
-
-  sourceFrame.addEventListener("load", () => {
-    if (sourceFrame.src && sourceFrame.src !== "about:blank") {
-      A.setText(sourceMessage, "");
-      A.show(sourceMessage, false);
-    }
-  });
-
-  sourceFrame.addEventListener("error", () => {
-    A.setText(sourceMessage, "Не удалось загрузить представление источника. Откройте оригинал.");
-    A.show(sourceMessage, true);
-  });
-
-  sourceDialog.addEventListener("close", () => {
-    closeSourceFrame();
-  });
 
   question.addEventListener("input", () => {
     saveDraft();

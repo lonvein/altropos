@@ -670,6 +670,17 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
 
         for par in _layout_groups(paragraphs,work,read_number,diag,read_unrestricted):
             text = " ".join(" ".join(words) for _, words in sorted(par["line"].items()))
+            line_words: dict[int, list[dict]] = {}
+            for word in par["words"]:
+                line_words.setdefault(word.get("line", 0), []).append(word)
+            line_boxes = []
+            for line_id, words in sorted(line_words.items()):
+                lbox = [min(w["box"][0] for w in words), min(w["box"][1] for w in words),
+                        max(w["box"][2] for w in words), max(w["box"][3] for w in words)]
+                line_boxes.append({
+                    "text": " ".join(w["text"] for w in words),
+                    "bbox": _inverse_box(lbox, steps, original_size, page_size),
+                })
             markers = _reference_markers(par["words"])
             for marker in markers:
                 marker["bbox"] = _inverse_box(marker.pop("box"), steps, original_size, page_size)
@@ -678,6 +689,8 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
                 change["bbox"] = _inverse_box(change.pop("box"), steps, original_size, page_size)
             items.append({"text": text, "raw_text":par["raw_text"], "list_item":par["list_item"],
                           "layout_corrections":changes, "bbox": _inverse_box(par["box"], steps, original_size, page_size),
+                          "lines": line_boxes,
+                          "page_size": [round(float(page_size[0]), 1), round(float(page_size[1]), 1)],
                           "conf": sum(par["confs"])/len(par["confs"]),
                           "work_bbox": par["box"], "height": median(par["heights"]),
                           "reference_markers": markers,

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Проверка распознавания · Altropos</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/common.js" defer></script>
+  <script src="/static/js/review-nav.js" defer></script>
+</head>
+<body class="review-body">
+  <main class="site-main review-shell">
+    <nav class="review-nav" aria-label="Навигация">
+      <a href="/documents" class="button button--secondary review-back" data-review-back
+         data-review-scope="index" data-back-fallback="/documents">← Назад</a>
+      <a href="/" class="button button--ghost review-back">Задать вопрос</a>
+      {% if has_static_packages %}
+        <a href="/review-files/index.html" class="button button--ghost review-back">Пакеты корпуса</a>
+      {% endif %}
+    </nav>
+
+    <header class="panel review-header">
+      <div>
+        <p class="eyebrow">Контроль качества</p>
+        <h1>Проверка распознавания</h1>
+        <p class="lead">
+          Доступна проверка любого документа, включая статус «Готов» и уже подтверждённые файлы.
+          Повторная проверка и правка текста отделены от повторного запуска OCR.
+        </p>
+      </div>
+    </header>
+
+    <section id="review-app" class="panel review-workspace" data-initial-doc-id="{{ selected_doc_id }}">
+      <div class="review-selector-row">
+        <label class="field review-doc-select">
+          <span>Документ</span>
+          <select id="review-document-select">
+            <option value="">Загрузка списка документов…</option>
+          </select>
+        </label>
+        <div class="review-doc-summary">
+          <span id="review-doc-status" class="badge status-queued">—</span>
+          <span id="review-doc-version" class="muted"></span>
+          <span id="review-doc-approved" class="muted"></span>
+        </div>
+      </div>
+
+      <p id="review-error" class="field-error" role="alert" hidden></p>
+      <p id="review-state" class="form-state" role="status" hidden></p>
+
+      <div id="review-empty" class="empty-state" hidden>
+        Документы ещё не загружены. Перейдите в раздел «Документы», чтобы загрузить файл.
+      </div>
+
+      <div id="review-detail" hidden>
+        <div class="review-warnings callout callout--warning" id="review-warnings-box" hidden>
+          <h3>Замечания при распознавании</h3>
+          <ul id="review-warnings-list" class="plain-list"></ul>
+        </div>
+
+        <div class="review-actions-grid">
+          <section class="review-action-card">
+            <h3>1. Повторная проверка результатов (без OCR)</h3>
+            <p class="muted">
+              Исправьте ошибки в распознанных блоках и обновите статус проверки. Оригинал и история подтверждений сохраняются.
+            </p>
+            <div class="form-grid">
+              <label class="field field--compact">
+                <span>Проверяющий</span>
+                <input id="review-reviewer" type="text" value="Оператор" maxlength="200">
+              </label>
+              <label class="field field--compact">
+                <span>Комментарий к проверке</span>
+                <input id="review-comment" type="text" placeholder="Что уточнено или исправлено" maxlength="500">
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="button" id="review-approve-btn" class="button button--primary">Сохранить и подтвердить проверку</button>
+              <button type="button" id="review-reject-btn" class="button button--ghost">Требует доработки</button>
+            </div>
+          </section>
+
+          <section class="review-action-card">
+            <h3>2. Повторный запуск OCR</h3>
+            <p class="muted">
+              Запустите распознавание заново по сохранённому оригиналу. Создаётся новая версия индексации без потери оригинала и истории.
+            </p>
+            <div class="form-actions">
+              <button type="button" id="review-reocr-btn" class="button button--secondary">Запустить повторный OCR</button>
+              <a id="review-download-original" class="button button--ghost" download hidden>Скачать оригинал</a>
+            </div>
+          </section>
+        </div>
+
+        <div class="review-columns">
+          <section class="review-preview-pane" aria-label="Оригинальная страница">
+            <div class="review-pane-head">
+              <h3>Оригинал документа</h3>
+              <div id="review-page-controls" class="review-page-controls" hidden>
+                <button type="button" id="review-prev-page" class="button button--ghost button--compact">←</button>
+                <span id="review-page-label" class="muted">Стр. 1 / 1</span>
+                <button type="button" id="review-next-page" class="button button--ghost button--compact">→</button>
+              </div>
+            </div>
+            <div class="review-preview-frame">
+              <img id="review-preview-image" alt="Страница оригинала" hidden>
+              <p id="review-preview-note" class="muted" hidden></p>
+            </div>
+          </section>
+
+          <section class="review-blocks-pane" aria-label="Распознанные блоки">
+            <div class="review-pane-head">
+              <h3>Распознанный текст (редактируемый)</h3>
+              <button type="button" id="review-reset-edits" class="button button--ghost button--compact">Сбросить правки</button>
+            </div>
+            <div id="review-blocks-list" class="review-blocks-list"></div>
+          </section>
+        </div>
+
+        <details id="review-history-panel" class="review-history-panel" open>
+          <summary>История подтверждений, правок и OCR</summary>
+          <ul id="review-history-list" class="review-history-list plain-list"></ul>
+        </details>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

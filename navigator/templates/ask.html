@@ -138,38 +138,7 @@
   </details>
 </section>
 
-<dialog id="source-dialog" class="dialog dialog--source" aria-labelledby="source-title">
-  <div class="dialog__header">
-    <div>
-      <p class="eyebrow">Подтверждение</p>
-      <h2 id="source-title">Источник</h2>
-      <p id="source-locator" class="muted"></p>
-    </div>
-    <button type="button" class="icon-button" data-close-dialog aria-label="Закрыть">×</button>
-  </div>
-
-  <blockquote id="source-quote" class="quote"></blockquote>
-
-  <p class="muted">
-    Представление содержит полный опубликованный текст; выбранный фрагмент выделен.
-    Для проверки оформления и качества распознавания откройте оригинал.
-  </p>
-
-  <div class="dialog__actions dialog__actions--start">
-    <a id="source-original" class="button button--secondary" target="_blank" rel="noopener" hidden>Открыть оригинал</a>
-    <a id="source-new-tab" class="button button--ghost" target="_blank" rel="noopener" hidden>Открыть представление</a>
-  </div>
-
-  <p id="source-message" class="field-error" role="alert" hidden></p>
-  <div class="source-frame-wrap">
-    <iframe id="source-frame" class="source-frame" title="HTML-представление источника"
-            sandbox="" referrerpolicy="no-referrer" hidden></iframe>
-  </div>
-
-  <div class="dialog__actions">
-    <button type="button" class="button button--primary" data-close-dialog>Закрыть</button>
-  </div>
-</dialog>
+{% include "_source_dialog.html" %}
 
 <template id="claim-template">
   <li class="claim">
@@ -204,5 +173,6 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/source-viewer.js" defer></script>
 <script src="/static/js/ask.js" defer></script>
 {% endblock %}

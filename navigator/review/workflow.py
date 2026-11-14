@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from navigator.ingestion import Parsed, parse_file
-from navigator.ingestion.common import to_fragments
+from navigator.ingestion.common import Unit, to_fragments
 from navigator.schemas import Document, Fragment
 
 
@@ -272,7 +272,7 @@ def prepare_document(source: Path, out_root: Path, *, parsed: Parsed | None = No
     manifest["files"] = {p.name: _sha(p.read_bytes()) for p in sorted(directory.iterdir()) if p.is_file()}
     _write_json(directory / "manifest.json", manifest)
     review = {"status": "pending", "reviewer": None, "comment": "",
-              "manifest_digest": _digest(manifest)}
+              "history": [], "manifest_digest": _digest(manifest)}
     _write_json(directory / "review.json", review)
     return {"package_dir": str(directory.resolve()), "review": review, "manifest": manifest}
 
@@ -309,20 +309,243 @@ def show_package(package_dir: Path) -> dict:
             "html": str((Path(package_dir) / "index.html").resolve())}
 
 
+def _append_review_history(existing_review: dict, *, action: str | None = None) -> list[dict]:
+    history = list(existing_review.get("history") or [])
+    if existing_review.get("status") != "pending" or existing_review.get("reviewer"):
+        entry = {
+            "status": existing_review.get("status"),
+            "reviewer": existing_review.get("reviewer"),
+            "comment": existing_review.get("comment", ""),
+            "decided_at": existing_review.get("decided_at"),
+            "manifest_digest": existing_review.get("manifest_digest"),
+        }
+        if action:
+            entry["action"] = action
+        history.append(entry)
+    return history
+
+
 def record_decision(package_dir: Path, decision: str, *, reviewer: str, comment: str = "") -> dict:
-    """Record an explicit user's decision. Never infer approval from metadata."""
+    """Record an explicit user's decision. Preserve history; approval does not lock re-review."""
     if decision not in {"approved", "rejected", "excluded"}:
         raise ReviewError("Decision must be approved, rejected, or excluded")
     if not reviewer or not reviewer.strip():
         raise ReviewError("An explicit reviewer is required")
-    manifest, _, snapshot, fragments = _validate(package_dir)
+    manifest, existing_review, snapshot, fragments = _validate(package_dir)
     if decision == "approved" and (snapshot["needs_review"] or not fragments or
                                    any(d.get("error") for d in manifest["diagnostics"])):
         raise ReviewError("Technical needs_review or preview errors prevent approval")
+    history = _append_review_history(existing_review)
     review = {"status": decision, "reviewer": reviewer.strip(), "comment": comment,
-              "decided_at": datetime.now(timezone.utc).isoformat(), "manifest_digest": _digest(manifest)}
+              "decided_at": datetime.now(timezone.utc).isoformat(),
+              "history": history, "manifest_digest": _digest(manifest)}
     _write_json(Path(package_dir) / "review.json", review)
     return review
+
+
+def reopen_package_review(package_dir: Path, *, reviewer: str = "operator", comment: str = "") -> dict:
+    """Re-open an approved or decided package for another review while keeping original and history."""
+    if not reviewer or not reviewer.strip():
+        raise ReviewError("An explicit reviewer is required")
+    manifest, existing_review, _, _ = _validate(package_dir)
+    history = _append_review_history(existing_review)
+    history.append({
+        "action": "reopen",
+        "status": "pending",
+        "reviewer": reviewer.strip(),
+        "comment": comment,
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "manifest_digest": manifest and _digest(manifest),
+    })
+    review = {"status": "pending", "reviewer": None, "comment": comment,
+              "history": history, "manifest_digest": _digest(manifest)}
+    _write_json(Path(package_dir) / "review.json", review)
+    return review
+
+
+def _rebuild_package(directory: Path, manifest: dict, parsed: Parsed, diagnostics: list[dict],
+                     history: list[dict], *, comment: str = "") -> dict:
+    original = directory / manifest["original"]
+    sha = manifest["original_sha256"]
+    if _sha(original.read_bytes()) != sha:
+        raise ReviewError("Original changed; cannot rebuild review package")
+    drafts = parsed.build()
+    snapshot = _json(vars(parsed))
+    extraction_digest = _digest(snapshot)
+    doc_id = manifest["document"]["id"]
+    prev_version = manifest["document"].get("version", "v-1")
+    rev_num = len(history) + 1
+    version = f"v-{extraction_digest[:12]}-r{rev_num}"
+    if version == prev_version:
+        version = f"{version}-next"
+    fragments = [_json(f) for f in to_fragments(doc_id, version, drafts)]
+    document = Document(
+        id=doc_id,
+        version=version,
+        name=manifest["source_name"],
+        title=(parsed.title or Path(manifest["source_name"]).stem)[:500],
+        sha256=sha,
+        original_path=str(original.resolve()),
+        media_type=parsed.media_type,
+        status="needs_review" if parsed.needs_review else "processing",
+        metadata=parsed.metadata or {},
+        warnings=parsed.warnings,
+    )
+    new_manifest = {
+        "schema_version": 1,
+        "group": manifest["group"],
+        "original": manifest["original"],
+        "source_name": manifest["source_name"],
+        "original_sha256": sha,
+        "document": _json(document),
+        "diagnostics": diagnostics,
+        "parser_fingerprint": parser_fingerprint(),
+        "extraction_digest": extraction_digest,
+        "fragments_digest": _digest(fragments),
+        "blocks_digest": _digest(parsed.blocks),
+    }
+    _write_json(directory / "snapshot.json", snapshot)
+    _write_json(directory / "fragments.json", fragments)
+    (directory / "readable.txt").write_text("\n\n".join(u.text for u in parsed.units), encoding="utf-8")
+    (directory / "index.html").write_text(_render(new_manifest, snapshot, fragments), encoding="utf-8")
+    new_manifest["files"] = {
+        p.name: _sha(p.read_bytes())
+        for p in sorted(directory.iterdir())
+        if p.is_file() and p.name not in {"manifest.json", "review.json"}
+    }
+    _write_json(directory / "manifest.json", new_manifest)
+    review = {"status": "pending", "reviewer": None, "comment": comment,
+              "history": history, "manifest_digest": _digest(new_manifest)}
+    _write_json(directory / "review.json", review)
+    return {"package_dir": str(directory.resolve()), "review": review, "manifest": new_manifest}
+
+
+def update_package_extraction(
+    package_dir: Path,
+    *,
+    units_text: list[str] | None = None,
+    blocks: list[dict] | None = None,
+    warnings: list[str] | None = None,
+    needs_review: bool | None = None,
+    reviewer: str = "operator",
+    comment: str = "",
+) -> dict:
+    """Save edited recognition results without re-running OCR; keep original & approval history."""
+    directory = Path(package_dir)
+    manifest, existing_review, snapshot, _ = _validate(directory)
+    history = _append_review_history(existing_review)
+    history.append({
+        "action": "edit_results",
+        "status": "pending",
+        "reviewer": reviewer.strip() or "operator",
+        "comment": comment,
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "manifest_digest": _digest(manifest),
+    })
+
+    old_units = [
+        Unit(
+            text=u["text"],
+            locator=dict(u["locator"]),
+            section=u.get("section", ""),
+            path=tuple(u.get("path") or ()),
+            kind=u.get("kind", "paragraph"),
+            atomic=bool(u.get("atomic", False)),
+            table_header=u.get("table_header", ""),
+            rows=u.get("rows"),
+            row_locators=u.get("row_locators"),
+            note_refs=tuple(u.get("note_refs") or ()),
+            note_id=u.get("note_id", ""),
+        )
+        for u in snapshot.get("units", [])
+    ]
+    new_blocks = list(blocks) if blocks is not None else list(snapshot.get("blocks", []))
+    if units_text is not None:
+        if len(units_text) != len(old_units):
+            raise ReviewError("Length of units_text must match existing units")
+        for u, txt in zip(old_units, units_text):
+            u.text = txt
+        if blocks is None:
+            for b, txt in zip(new_blocks, units_text):
+                if "text" in b:
+                    b["text"] = txt
+    elif blocks is not None:
+        rebuilt: list[Unit] = []
+        media = manifest["document"]["media_type"]
+        for i, b in enumerate(new_blocks):
+            loc = {"kind": media}
+            if media == "pdf":
+                loc["page"] = int(b.get("page", 1))
+                if b.get("bbox"):
+                    loc["bbox"] = b["bbox"]
+            elif media in {"docx", "html"}:
+                loc["block"] = int(b.get("index", i))
+            elif media == "xlsx":
+                loc["sheet"] = b.get("sheet", "Sheet1")
+                loc["range"] = b.get("range", "A1")
+            rows_data = b.get("table", b.get("rows"))
+            if rows_data and isinstance(rows_data, list):
+                if media == "xlsx" and rows_data and isinstance(rows_data[0], dict):
+                    row_texts = [" | ".join(str(c.get("text", c.get("cached", ""))) for c in r.get("cells", [])) for r in rows_data]
+                else:
+                    row_texts = [" | ".join(str(c) for c in r) for r in rows_data if isinstance(r, list)]
+                header = row_texts[0] if row_texts else ""
+                body_rows = row_texts[1:] if len(row_texts) > 1 else row_texts
+                rebuilt.append(Unit(
+                    text="\n".join(row_texts) or b.get("text", ""),
+                    locator=loc,
+                    kind="table",
+                    table_header=header,
+                    rows=body_rows,
+                ))
+            elif b.get("text"):
+                rebuilt.append(Unit(
+                    text=str(b["text"]),
+                    locator=loc,
+                    section=str(b.get("section", "")),
+                    kind=str(b.get("kind", "paragraph") or "paragraph"),
+                    atomic=len(str(b["text"])) < 900,
+                ))
+        if rebuilt:
+            old_units = rebuilt
+
+    parsed = Parsed(
+        media_type=snapshot["media_type"],
+        title=snapshot.get("title", ""),
+        units=old_units,
+        blocks=new_blocks,
+        metadata=snapshot.get("metadata") or {},
+        warnings=list(warnings) if warnings is not None else list(snapshot.get("warnings", [])),
+        needs_review=bool(needs_review) if needs_review is not None else False,
+        diagnostics=list(snapshot.get("diagnostics", [])),
+    )
+    return _rebuild_package(directory, manifest, parsed, manifest["diagnostics"], history, comment=comment)
+
+
+def reocr_package(
+    package_dir: Path,
+    *,
+    ocr=None,
+    parsed: Parsed | None = None,
+    reviewer: str = "operator",
+    comment: str = "",
+) -> dict:
+    """Re-run OCR/parsing on the untouched original file, keeping approval history."""
+    directory = Path(package_dir)
+    manifest, existing_review, _, _ = _validate(directory)
+    history = _append_review_history(existing_review)
+    history.append({
+        "action": "reocr",
+        "status": "pending",
+        "reviewer": reviewer.strip() or "operator",
+        "comment": comment,
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "manifest_digest": _digest(manifest),
+    })
+    original = directory / manifest["original"]
+    new_parsed = parsed if parsed is not None else (parse_file(original, ocr=ocr) if ocr is not None else parse_file(original))
+    diagnostics = _pdf_previews(original, directory) if new_parsed.media_type == "pdf" else []
+    return _rebuild_package(directory, manifest, new_parsed, diagnostics, history, comment=comment)
 
 
 def load_approved_package(package_dir: Path) -> dict:
