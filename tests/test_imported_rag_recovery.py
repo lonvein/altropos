@@ -94,7 +94,7 @@ def test_unrelated_broken_publication_does_not_disable_healthy_import(imported):
     service.store.execute("UPDATE documents SET payload=json_set(payload,'$.version','unpublished-v2') WHERE id=?",(other['document_id'],))
     result=asyncio.run(Searcher(service.store,service.settings,embeddings,Reranker(service.settings)).search(SearchRequest(question=QUERIES[0])))
     assert result.hits[0].fragment.document_id==doc_id
-    assert any(other['document_id'] in w for w in result.warnings)
+    assert not any(other['document_id'] in w for w in result.warnings)
     assert all(h.fragment.document_id!=other['document_id'] for h in result.hits)
 
 
@@ -106,7 +106,7 @@ def test_unrelated_corrupt_artifact_is_quarantined(imported):
     (service.store.root / manifest.bm25.path).write_bytes(b'ARTIFICIAL corruption')
     result=asyncio.run(Searcher(service.store,service.settings,embeddings,Reranker(service.settings)).search(SearchRequest(question=QUERIES[0])))
     assert result.hits[0].fragment.document_id==doc_id
-    assert any(other['document_id'] in w for w in result.warnings)
+    assert not any(other['document_id'] in w for w in result.warnings)
 
 
 def test_uncalibrated_candidates_do_not_authorize_unsupported_answer(imported):

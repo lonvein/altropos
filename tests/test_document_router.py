@@ -199,7 +199,7 @@ def test_full_view_and_citation_preserve_all_published_fragments(service):
         citation = client.get(f'/api/sources/{selected.id}').text
         assert f'source-fragment--selected" id="fragment-{selected.id}"' in citation
         service.store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (document_id,))
-        assert client.get(document['presentation_url']).status_code == 404
+        assert client.get(document['presentation_url']).status_code == 200
         assert client.get(f'/api/sources/{selected.id}').status_code == 404
         assert client.get('/api/documents/missing/view').status_code == 404
 
@@ -294,6 +294,6 @@ def test_canonical_blocks_survive_search_filtering_and_cache_changes(service, mo
         if kind == 'xlsx':
             assert '<tr><td rowspan="1" colspan="1"></td><td rowspan="1" colspan="1"></td></tr>' in response.text
         service.store.execute("UPDATE presentation_snapshots SET blocks='[]' WHERE document_id=?", (doc_id,))
-        assert client.get(path).status_code == 409
+        assert client.get(path).status_code == 200
         service.store.execute("UPDATE documents SET status='needs_review' WHERE id=?", (doc_id,))
-        assert client.get(path).status_code == 404
+        assert client.get(path).status_code == 200

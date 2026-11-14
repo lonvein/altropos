@@ -373,7 +373,10 @@
     A.setText(clarificationText, clarification || "");
     A.show(clarificationPanel, Boolean(clarification));
 
-    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    // Saved answers can predate server-side separation of technical diagnostics.
+    const warnings = (Array.isArray(data.warnings) ? data.warnings : []).filter(
+      (warning) => !/^Порог reranker не откалиброван;|^Документ doc-.+ исключён из поиска: индекс или версия не согласованы;/.test(String(warning)),
+    );
     A.clear(warningsList);
     warnings.forEach((warning) => {
       const item = A.cloneTemplate("warning-template").querySelector("li");
