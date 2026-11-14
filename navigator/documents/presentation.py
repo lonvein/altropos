@@ -1,7 +1,9 @@
 """Escaped canonical content views; search chunks are citation evidence only."""
 import json
 import re
+from functools import lru_cache
 from html import escape
+from pathlib import Path
 
 from navigator.schemas import Fragment
 
@@ -11,6 +13,18 @@ SOURCE_HEADERS = {
 }
 
 _SPACE_RE = re.compile(r"\s+")
+_SOURCE_CSS_PATH = Path(__file__).resolve().parent.parent / "static" / "css" / "source.css"
+
+
+@lru_cache(maxsize=1)
+def _inline_source_css_tag() -> str:
+    """Inline source.css inside sandboxed source HTML so iframe CSP keeps styles active."""
+    try:
+        css = _SOURCE_CSS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    safe_css = css.replace("</style", "<\\/style")
+    return f"<style>{safe_css}</style>"
 
 
 def _text(value):
@@ -162,9 +176,16 @@ def render_publication(title: str, document_id: str, fragments: list[Fragment], 
         if is_hit and first_hit_block_id is None:
             first_hit_block_id = i
         hit_class = " source-block--highlighted" if is_hit else ""
+        inner_html = _block(block, selected_frag, is_hit=is_hit)
+        if block.get("suspected_rule") or block.get("kind") == "ocr_artifact":
+            inner_html = (
+                '<details class="source-artifact">'
+                '<summary>Служебный артефакт OCR (линии таблицы / разделитель)</summary>'
+                f'{inner_html}</details>'
+            )
         canonical.append(
             f'<section class="source-block{hit_class}" id="block-{i}">'
-            f'{_block(block, selected_frag, is_hit=is_hit)}</section>'
+            f'{inner_html}</section>'
         )
 
     sections = []
@@ -191,7 +212,7 @@ def render_publication(title: str, document_id: str, fragments: list[Fragment], 
     return (
         '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>{escape(title)}</title><link rel="stylesheet" href="/static/css/source.css"></head>'
+        f'<title>{escape(title)}</title><link rel="stylesheet" href="/static/css/source.css">{_inline_source_css_tag()}</head>'
         f'<body><main class="source-page"><h1>{escape(title)}</h1>'
         '<nav class="source-navigation">'
         f'<a href="/api/documents/{escape(document_id)}/original">Скачать оригинал</a> · '

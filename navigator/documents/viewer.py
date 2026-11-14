@@ -5,6 +5,7 @@ import json
 from html import escape
 from typing import Any
 
+from navigator.documents.presentation import _inline_source_css_tag
 from navigator.schemas import Fragment, MetadataPatch
 
 
@@ -112,6 +113,7 @@ def render_source_html(
         '  <meta name="color-scheme" content="light dark">\n'
         f"  <title>{safe_title}</title>\n"
         '  <link rel="stylesheet" href="/static/css/source.css">\n'
+        f"  {_inline_source_css_tag()}\n"
         "</head>\n"
         "<body>\n"
         '  <main class="source-page">\n'

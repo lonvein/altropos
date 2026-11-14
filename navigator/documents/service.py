@@ -652,11 +652,151 @@ class DocumentService:
                         ),
                     )
 
+        for row in self.store.rows(
+            "SELECT * FROM documents WHERE status IN ('ready', 'needs_review')"
+        ):
+            try:
+                self._heal_incomplete_pdf_pages(dict(row))
+            except Exception:
+                logger.debug("Автовосстановление пропущенных страниц PDF пропущено для %s", row.get("id"), exc_info=True)
+
+    def _heal_incomplete_pdf_pages(self, row: dict) -> bool:
+        """Re-extract and republish PDFs whose stored blocks missed image-heavy pages (e.g. Page 1)."""
+        raw_payload = row.get("payload")
+        if not raw_payload:
+            return False
+        try:
+            doc = Document.model_validate_json(raw_payload)
+        except Exception:
+            return False
+        if doc.media_type != "pdf":
+            return False
+        try:
+            orig_path = self.storage.get_original_path(row.get("path") or doc.original_path)
+        except Exception:
+            return False
+        if not orig_path.is_file():
+            return False
+
+        blocks = self.storage.get_extracted_blocks(doc.id)
+        if blocks is None and row.get("active_publication"):
+            pub_rows = self.store.rows(
+                "SELECT manifest, fragments FROM publications WHERE id=?",
+                (row["active_publication"],),
+            )
+            if pub_rows:
+                try:
+                    from navigator.documents.snapshots import load_snapshot
+                    frags = [Fragment.model_validate(f) for f in json.loads(pub_rows[0]["fragments"])]
+                    blocks = load_snapshot(self, {**row, **pub_rows[0]}, frags)
+                except Exception:
+                    blocks = None
+        if not blocks:
+            return False
+
+        pages_present = {
+            int(b["page"])
+            for b in blocks
+            if isinstance(b, dict)
+            and b.get("page") is not None
+            and (str(b.get("text") or "").strip() or b.get("table") or b.get("rows"))
+        }
+        if not pages_present:
+            return False
+        page1_chars = sum(
+            len(re.sub(r"\s+", "", str(b.get("text") or "")))
+            for b in blocks
+            if isinstance(b, dict) and b.get("page") == 1
+        )
+
+        try:
+            import pdfplumber
+            from navigator.ingestion.pdf_parser import _image_dominant
+            with pdfplumber.open(orig_path) as pdf:
+                total_pages = len(pdf.pages)
+                missing_pages = [pno for pno in range(1, total_pages + 1) if pno not in pages_present]
+                sparse_image_p1 = (
+                    total_pages >= 1
+                    and page1_chars < 200
+                    and _image_dominant(pdf.pages[0])
+                    and (total_pages == 1 or any(isinstance(b, dict) and b.get("ocr") and b.get("page") != 1 for b in blocks))
+                )
+        except Exception:
+            return False
+
+        if not missing_pages and not sparse_image_p1:
+            return False
+
+        from navigator.ingestion.ocr import make_ocr
+        ocr = make_ocr(
+            tesseract_cmd=self.settings.tesseract_cmd,
+            tessdata_dir=self.settings.tessdata_prefix,
+        )
+        if ocr is None:
+            return False
+
+        parsed = parse_file(orig_path, ocr=ocr)
+        if not parsed.blocks:
+            return False
+        new_pages = {
+            int(b["page"])
+            for b in parsed.blocks
+            if isinstance(b, dict)
+            and b.get("page") is not None
+            and (str(b.get("text") or "").strip() or b.get("table") or b.get("rows"))
+        }
+        new_p1_chars = sum(
+            len(re.sub(r"\s+", "", str(b.get("text") or "")))
+            for b in parsed.blocks
+            if isinstance(b, dict) and b.get("page") == 1
+        )
+        if len(new_pages) <= len(pages_present) and new_p1_chars <= page1_chars + 150:
+            return False
+
+        self.storage.save_extracted_blocks(doc.id, parsed.blocks)
+        if doc.title and doc.title[:1].islower():
+            repaired_title = (parsed.title or Path(doc.name).stem)[:500]
+            if repaired_title and not repaired_title[:1].islower():
+                doc.title = repaired_title
+                doc.metadata = doc.metadata.model_copy(update={"title": repaired_title})
+
+        drafts = parsed.build()
+        file_sha = sha256_bytes(orig_path.read_bytes())
+        doc.version, fragments = self._resolve_nonconflicting_version(
+            doc.id,
+            self._next_version(doc.version),
+            drafts,
+            parsed.blocks,
+            file_sha,
+        )
+        is_ready = row.get("status") == "ready"
+        doc.warnings = filter_user_warnings(
+            [w[:500] for w in parsed.warnings],
+            status="ready" if is_ready else "needs_review",
+            needs_review=not is_ready,
+        )
+        doc.status = "processing" if is_ready else "needs_review"
+        self.store.execute(
+            "UPDATE documents SET title=?, metadata=?, payload=?, status=? WHERE id=?",
+            (doc.title, doc.metadata.model_dump_json(), doc.model_dump_json(), doc.status, doc.id),
+        )
+        if is_ready and fragments:
+            from navigator.documents.snapshots import save_snapshot
+            save_snapshot(self.store, doc, fragments, parsed.blocks)
+            self.indexer.index_document(doc.id, fragments)
+            self.store.execute(
+                "UPDATE documents SET payload=json_set(payload, '$.status', status) WHERE id=?",
+                (doc.id,),
+            )
+        return True
+
     @staticmethod
     def _blocks_to_units(blocks: list[dict], media_type: str) -> list[Unit]:
         units: list[Unit] = []
         for idx, block in enumerate(blocks):
             if not isinstance(block, dict):
+                continue
+            if block.get("suspected_rule") or block.get("kind") == "ocr_artifact":
                 continue
             loc: dict = {"kind": media_type}
             if media_type == "pdf":

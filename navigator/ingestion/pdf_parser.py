@@ -283,6 +283,21 @@ def parse_pdf(path: Path, ocr=None) -> Parsed:
                         lbox = _bbox(ln["bbox"], page) if ln.get("bbox") else None
                         if lbox:
                             norm_lines.append({"text": ln.get("text", ""), "bbox": lbox})
+                    if item.get("table"):
+                        rows = [[_clean(str(c)) for c in row] for row in item["table"]]
+                        rows = [row for row in rows if any(row)]
+                        if rows:
+                            loc = {"kind": "pdf", "page": number}
+                            if item.get("bbox"):
+                                loc["bbox"] = item["bbox"]
+                            header = " | ".join(rows[0])
+                            body = [" | ".join(r) for r in rows[1:]]
+                            units.append(Unit(text="\n".join(" | ".join(r) for r in rows), locator=loc, kind="table",
+                                              path=outline.path, table_header=header, rows=body))
+                            blocks.append({"page": number, "table": rows, "bbox": item.get("bbox"),
+                                           "lines": norm_lines, "page_size": page_dims, "ocr": True,
+                                           "conf": item.get("conf")})
+                        continue
                     if item.get("suspected_rule"):
                         blocks.append({"page": number, "text": item["text"], "bbox": item.get("bbox"),
                                        "lines": norm_lines, "page_size": page_dims,
@@ -412,7 +427,9 @@ def _ocr_page(page, number: int, ocr):
         diag["warnings"].append("OCR недоступен")
         return OCRResult(**diag)
     try:
-        image = page.to_image(resolution=300, force_mediabox=True).original
+        max_pts = max(float(getattr(page, "width", 0) or 0), float(getattr(page, "height", 0) or 0), 842.0)
+        resolution = min(300, max(144, round(300.0 * 842.0 / max_pts)))
+        image = page.to_image(resolution=resolution, force_mediabox=True).original
         if getattr(ocr, "supports_page_size", False):
             items = ocr(image, number, page_size=(float(page.width), float(page.height)))
         else:

@@ -1585,6 +1585,52 @@ code,
   height: auto;
   display: block;
   background: #ffffff;
+  transition: transform 0.15s ease;
+}
+
+.review-preview-frame img.is-rot-90 {
+  transform: rotate(90deg) scale(0.72);
+}
+
+.review-preview-frame img.is-rot-180 {
+  transform: rotate(180deg);
+}
+
+.review-preview-frame img.is-rot-270 {
+  transform: rotate(270deg) scale(0.72);
+}
+
+.review-page-jump {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.review-block-table-wrap {
+  overflow-x: auto;
+}
+
+.review-block-table-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  background: var(--surface);
+}
+
+.review-block-table-grid td {
+  border: 1px solid var(--border);
+  padding: 0.3rem 0.45rem;
+  vertical-align: top;
+}
+
+.review-block-table-grid tr:first-child td {
+  font-weight: 600;
+  background: var(--surface-muted);
 }
 
 .review-blocks-list {

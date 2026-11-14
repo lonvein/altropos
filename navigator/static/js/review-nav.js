@@ -90,6 +90,7 @@
     const pageControls = document.getElementById("review-page-controls");
     const prevPageBtn = document.getElementById("review-prev-page");
     const nextPageBtn = document.getElementById("review-next-page");
+    const rotatePageBtn = document.getElementById("review-rotate-page");
     const pageLabel = document.getElementById("review-page-label");
     const previewImg = document.getElementById("review-preview-image");
     const previewNote = document.getElementById("review-preview-note");
@@ -101,6 +102,7 @@
     let currentDetail = null;
     let currentPage = 1;
     let pageCount = 1;
+    let previewRotation = 0;
     let dirtyBlocks = false;
 
     function showError(msg) {
@@ -136,6 +138,13 @@
       return `${act}${dec}${ver}${rev}${time}${comment}`;
     }
 
+    function applyPreviewRotation() {
+      previewImg.classList.remove("is-rot-90", "is-rot-180", "is-rot-270");
+      if (previewRotation === 90 || previewRotation === 180 || previewRotation === 270) {
+        previewImg.classList.add(`is-rot-${previewRotation}`);
+      }
+    }
+
     function renderPreview(doc, originalInfo) {
       pageCount = Math.max(1, Number(originalInfo?.page_count) || 1);
       currentPage = Math.max(1, Math.min(pageCount, currentPage));
@@ -152,6 +161,7 @@
         A.show(previewNote, false);
         A.show(previewImg, true);
         previewImg.src = `/api/documents/${encodeURIComponent(doc.id)}/original-page/${currentPage}?scale=1.5`;
+        applyPreviewRotation();
       } else {
         A.show(pageControls, false);
         A.show(previewImg, false);
@@ -173,9 +183,19 @@
       }
       blocks.forEach((blk, idx) => {
         const card = A.make("div", "review-block-card");
+        const head = A.make("div", "review-block-card__head muted");
         const metaParts = [];
-        if (blk.page) {
-          metaParts.push(`Стр. ${blk.page}`);
+        if (blk.page && currentDetail?.document) {
+          const jumpBtn = A.make("button", "review-page-jump", `Стр. ${blk.page}`);
+          jumpBtn.type = "button";
+          jumpBtn.title = `Показать страницу ${blk.page}`;
+          jumpBtn.addEventListener("click", () => {
+            currentPage = Number(blk.page);
+            previewRotation = 0;
+            renderPreview(currentDetail.document, currentDetail.original_info);
+          });
+          head.appendChild(jumpBtn);
+          head.appendChild(document.createTextNode(" "));
         }
         if (blk.sheet) {
           metaParts.push(`Лист «${blk.sheet}»`);
@@ -183,9 +203,32 @@
         if (blk.kind) {
           metaParts.push(blk.kind);
         }
-        card.appendChild(A.make("div", "review-block-card__head muted", metaParts.join(" · ") || `Блок ${idx + 1}`));
+        if (metaParts.length > 0) {
+          head.appendChild(document.createTextNode(metaParts.join(" · ")));
+        } else if (!blk.page) {
+          head.appendChild(document.createTextNode(`Блок ${idx + 1}`));
+        }
+        card.appendChild(head);
 
-        if (typeof blk.text === "string") {
+        if (Array.isArray(blk.table || blk.rows)) {
+          const rows = blk.table || blk.rows;
+          const wrap = A.make("div", "review-block-table-wrap");
+          const tbl = A.make("table", "review-block-table-grid");
+          rows.forEach((row) => {
+            if (!Array.isArray(row)) {
+              return;
+            }
+            const tr = document.createElement("tr");
+            row.forEach((cell) => {
+              const td = document.createElement("td");
+              td.textContent = cell == null ? "" : String(cell);
+              tr.appendChild(td);
+            });
+            tbl.appendChild(tr);
+          });
+          wrap.appendChild(tbl);
+          card.appendChild(wrap);
+        } else if (typeof blk.text === "string") {
           const textarea = document.createElement("textarea");
           textarea.className = "review-block-textarea";
           textarea.rows = Math.min(8, Math.max(2, Math.ceil(blk.text.length / 75)));
@@ -195,12 +238,6 @@
             dirtyBlocks = true;
           });
           card.appendChild(textarea);
-        } else if (Array.isArray(blk.table || blk.rows)) {
-          const rows = blk.table || blk.rows;
-          const summaryText = blk.sheet
-            ? `Таблица листа «${blk.sheet}» (${rows.length} строк)`
-            : `Таблица (${rows.length} строк)`;
-          card.appendChild(A.make("pre", "review-block-table", summaryText));
         }
         blocksList.appendChild(card);
       });
@@ -269,6 +306,7 @@
       }
       if (resetPage) {
         currentPage = 1;
+        previewRotation = 0;
       }
       showError("");
       showState("Загрузка данных проверки…");
@@ -423,6 +461,7 @@
     prevPageBtn?.addEventListener("click", () => {
       if (currentDetail && currentPage > 1) {
         currentPage -= 1;
+        previewRotation = 0;
         renderPreview(currentDetail.document, currentDetail.original_info);
       }
     });
@@ -430,7 +469,15 @@
     nextPageBtn?.addEventListener("click", () => {
       if (currentDetail && currentPage < pageCount) {
         currentPage += 1;
+        previewRotation = 0;
         renderPreview(currentDetail.document, currentDetail.original_info);
+      }
+    });
+
+    rotatePageBtn?.addEventListener("click", () => {
+      if (currentDetail) {
+        previewRotation = (previewRotation + 90) % 360;
+        applyPreviewRotation();
       }
     });
 

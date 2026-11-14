@@ -141,6 +141,24 @@ mark {
   color: var(--source-muted);
 }
 
+.source-artifact {
+  margin-block: 0.35rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px dashed var(--source-border);
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--source-muted);
+}
+
+.source-artifact summary {
+  cursor: pointer;
+}
+
+.source-document table tr:first-child td {
+  font-weight: 600;
+  background: var(--source-surface);
+}
+
 /* Publication sections stay in normal flow: long pages and wide tables remain readable. */
 .source-fragment {
   margin-block: 0.65rem 0.9rem;

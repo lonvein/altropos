@@ -575,3 +575,192 @@ def test_ocr_and_visual_confirmation_warnings_do_not_cause_failed_or_unconfirmed
     after_reocr = svc_manifest.get_document(doc_init.id)
     assert after_reocr["status"] == "ready"
     assert after_reocr["version"] == "v2"
+
+
+def test_ocr_page_caps_oversized_pdf_resolution():
+    from types import SimpleNamespace
+    from PIL import Image
+    from navigator.ingestion.pdf_parser import _ocr_page
+
+    captured = []
+
+    class FakePage:
+        def __init__(self, width, height):
+            self.width = width
+            self.height = height
+
+        def to_image(self, resolution=300, force_mediabox=True):
+            captured.append(resolution)
+            return SimpleNamespace(original=Image.new("RGB", (200, 200), "white"))
+
+    def fake_ocr(image, number, page_size=None):
+        return [{"text": "Пункт 1.1 Тест", "bbox": [10, 10, 100, 30], "lines": []}]
+
+    _ocr_page(FakePage(595.0, 842.0), 1, fake_ocr)
+    _ocr_page(FakePage(1240.0, 1753.0), 1, fake_ocr)
+    assert captured == [300, 144]
+
+
+def test_layout_groups_recovers_isolated_section_marker_and_merges_wrapped_lines():
+    from PIL import Image
+    from navigator.ingestion.ocr import _layout_groups
+
+    img = Image.new("RGB", (800, 400), "white")
+    paragraphs = {
+        (1, 1): {
+            "box": [50.0, 20.0, 320.0, 42.0],
+            "confs": [62.0, 95.0, 95.0],
+            "heights": [22.0, 22.0, 22.0],
+            "line": {1: ["I", "Общие", "положения"]},
+            "words": [
+                {"text": "I", "conf": 62.0, "box": [50.0, 20.0, 62.0, 42.0], "line": 1},
+                {"text": "Общие", "conf": 95.0, "box": [120.0, 20.0, 195.0, 42.0], "line": 1},
+                {"text": "положения", "conf": 95.0, "box": [205.0, 20.0, 320.0, 42.0], "line": 1},
+            ],
+        },
+        (2, 1): {
+            "box": [50.0, 60.0, 480.0, 82.0],
+            "confs": [95.0] * 4,
+            "heights": [22.0] * 4,
+            "line": {1: ["-", "на", "места", "для"]},
+            "words": [
+                {"text": "-", "conf": 95.0, "box": [50.0, 60.0, 58.0, 82.0], "line": 1},
+                {"text": "на", "conf": 95.0, "box": [72.0, 60.0, 96.0, 82.0], "line": 1},
+                {"text": "места", "conf": 95.0, "box": [104.0, 60.0, 165.0, 82.0], "line": 1},
+                {"text": "для", "conf": 95.0, "box": [174.0, 60.0, 210.0, 82.0], "line": 1},
+            ],
+        },
+        (2, 2): {
+            "box": [52.0, 90.0, 190.0, 112.0],
+            "confs": [95.0],
+            "heights": [22.0],
+            "line": {1: ["обучающихся;"]},
+            "words": [
+                {"text": "обучающихся;", "conf": 95.0, "box": [52.0, 90.0, 190.0, 112.0], "line": 1},
+            ],
+        },
+        (3, 1): {
+            "box": [50.0, 130.0, 420.0, 152.0],
+            "confs": [95.0, 95.0],
+            "heights": [22.0, 22.0],
+            "line": {1: ["Поселение", "в"]},
+            "words": [
+                {"text": "Поселение", "conf": 95.0, "box": [50.0, 130.0, 160.0, 152.0], "line": 1},
+                {"text": "в", "conf": 95.0, "box": [170.0, 130.0, 185.0, 152.0], "line": 1},
+            ],
+        },
+        (3, 2): {
+            "box": [50.0, 160.0, 430.0, 182.0],
+            "confs": [95.0, 95.0],
+            "heights": [22.0, 22.0],
+            "line": {1: ["Административно-хозяйственный", "комплекс."]},
+            "words": [
+                {"text": "Административно-хозяйственный", "conf": 95.0, "box": [50.0, 160.0, 310.0, 182.0], "line": 1},
+                {"text": "комплекс.", "conf": 95.0, "box": [320.0, 160.0, 430.0, 182.0], "line": 1},
+            ],
+        },
+    }
+    diag = {"needs_review": False, "warnings": []}
+    groups = _layout_groups(paragraphs, img, lambda crop, psm: ("1.", 90.0), diag)
+    texts = [g["text"] for g in groups]
+    assert texts[0] == "1. Общие положения"
+    assert texts[1] == "- на места для обучающихся;"
+    assert texts[2] == "Поселение в Административно-хозяйственный комплекс."
+    assert diag["needs_review"] is False
+
+
+def test_render_publication_embeds_source_css_and_wraps_ocr_artifacts():
+    from navigator.documents.presentation import render_publication
+
+    blocks = [
+        {"page": 1, "kind": "heading", "text": "1. Общие положения", "ocr": True},
+        {"page": 1, "kind": "ocr_artifact", "suspected_rule": True, "text": "___ | ___", "ocr": True},
+        {"page": 2, "table": [["№", "Пункт"], ["1", "Значение"]], "ocr": True},
+    ]
+    html = render_publication("Тест OCR PDF", "doc-ocr-1", [], blocks=blocks)
+    assert '<link rel="stylesheet" href="/static/css/source.css">' in html
+    assert "<style>" in html and ".source-document" in html
+    assert '<details class="source-artifact">' in html
+    assert '<td rowspan="1" colspan="1">№</td>' in html
+    assert '<td rowspan="1" colspan="1">Значение</td>' in html
+
+
+def test_heal_incomplete_pdf_pages_reextracts_missing_page_one(tmp_path, monkeypatch):
+    import json
+    from io import BytesIO
+    from PIL import Image, ImageDraw
+    from navigator.config import Settings
+    from navigator.db import Store
+    from navigator.documents.service import DocumentService
+    from navigator.documents.snapshots import load_snapshot, save_snapshot
+    from navigator.ingestion.common import sha256_bytes
+    from navigator.rag.indexing import Indexer
+    from navigator.schemas import Document, Fragment, MetadataPatch
+
+    p1 = Image.new("RGB", (595, 842), "white")
+    ImageDraw.Draw(p1).rectangle((40, 40, 550, 200), fill="black")
+    p2 = Image.new("RGB", (595, 842), "white")
+    ImageDraw.Draw(p2).rectangle((40, 40, 550, 120), fill="black")
+    buf = BytesIO()
+    p1.save(buf, format="PDF", save_all=True, append_images=[p2])
+    pdf_bytes = buf.getvalue()
+
+    rel_path = "originals/heal_settlement.pdf"
+    orig_file = tmp_path / rel_path
+    orig_file.parent.mkdir(parents=True, exist_ok=True)
+    orig_file.write_bytes(pdf_bytes)
+
+    store = Store(tmp_path)
+    cfg = Settings(data_dir=tmp_path)
+    indexer = Indexer(store=store, settings=cfg)
+
+    doc_id = "doc-heal-p1"
+    stale_blocks = [{"page": 2, "text": "2.6 Continued page text for test document."}]
+    stale_frags = [
+        Fragment(
+            id=f"{doc_id}-f0",
+            document_id=doc_id,
+            document_version="v1",
+            ordinal=0,
+            text="2.6 Continued page text for test document.",
+            locator={"kind": "pdf", "page": 2},
+        )
+    ]
+    doc = Document(
+        id=doc_id,
+        version="v1",
+        name="heal_settlement.pdf",
+        title="2.6 Continued",
+        sha256=sha256_bytes(pdf_bytes),
+        original_path=rel_path,
+        media_type="pdf",
+        status="processing",
+        metadata=MetadataPatch(title="2.6 Continued", reviewed=True),
+        warnings=[],
+    )
+    store.register_document(doc)
+    save_snapshot(store, doc, stale_frags, stale_blocks)
+    indexer.index_document(doc_id, stale_frags)
+    store.execute("UPDATE documents SET payload=json_set(payload, '$.status', 'ready') WHERE id=?", (doc_id,))
+
+    def fake_ocr(image, number, page_size=None):
+        if number == 1:
+            return [
+                {"text": "1. Общие положения", "bbox": [40.0, 80.0, 260.0, 100.0], "lines": []},
+                {"text": "1.1 Настоящий регламент определяет правила поселения сотрудников.", "bbox": [40.0, 120.0, 480.0, 150.0], "lines": []},
+            ]
+        return [{"text": "2.6 Continued page text for test document.", "bbox": [40.0, 80.0, 400.0, 100.0], "lines": []}]
+
+    fake_ocr.supports_page_size = True
+    monkeypatch.setattr("navigator.ingestion.ocr.make_ocr", lambda **kw: fake_ocr)
+
+    healed = DocumentService(store, cfg, indexer=indexer)
+    rec = healed.get_document(doc_id)
+    assert rec["status"] == "ready"
+    row = store.document(doc_id)
+    pub_rows = store.rows("SELECT manifest, fragments FROM publications WHERE id=?", (row["active_publication"],))
+    frags = [Fragment.model_validate(f) for f in json.loads(pub_rows[0]["fragments"])]
+    repaired_blocks = load_snapshot(healed, {**row, **pub_rows[0]}, frags)
+    pages = {b.get("page") for b in repaired_blocks}
+    assert {1, 2}.issubset(pages)
+    assert any("1.1 Настоящий регламент" in b.get("text", "") for b in repaired_blocks)

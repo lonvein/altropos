@@ -317,7 +317,8 @@ def _point_number_re():
 
 def _normalize_point_text(text: str) -> str:
     import re
-    return re.sub(r"(?<=\d),(?=\d)", ".", text.strip())
+    cleaned = re.sub(r"[\"'‘’`]", "", text.strip())
+    return re.sub(r"(?<=\d),(?=\d)", ".", cleaned)
 
 
 def _reread_number(image, box, read, original="", confidence=0, read_unrestricted=None):
@@ -336,7 +337,7 @@ def _reread_number(image, box, read, original="", confidence=0, read_unrestricte
     source_confidence = confidence
     norm_original = _normalize_point_text(original)
     readings = [norm_original] if confidence >= 70 and point_re.fullmatch(norm_original) else []
-    for variant, psm in ((crop,7),(crop,13),(bin_crop,7),(up_crop,7),(up_bin,7)):
+    for variant, psm in ((crop,7),(crop,13),(crop,8),(bin_crop,7),(up_crop,7),(up_bin,7)):
         try:
             text, confidence = read(variant,psm)
         except Exception:
@@ -483,15 +484,22 @@ def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None)
                            and words[1]["box"][0] - first["box"][2] >= body * 0.25)
             body_word = next((word for word in words[1:] if any(c.isalpha() for c in word["text"])),
                              words[1] if len(words)>1 else first)
-            number = (not bullet and not dash_bullet and len(words)>1 and ("." in first["text"] or ")" in first["text"])
-                      and re.fullmatch(r"\d[\d.,\]\[|Il)]{1,12}", first["text"])
+            isolated_section = (
+                not bullet and not dash_bullet and len(words) > 1
+                and re.fullmatch(r"[iIl|!1-9\[\]F]{1,4}\.?", first["text"])
+                and body_word["box"][0] - first["box"][2] >= body * 1.25
+                and any("а" <= c.lower() <= "я" for c in body_word["text"])
+                and body_word["text"][0].isupper()
+            )
+            number = (not bullet and not dash_bullet and len(words)>1 and ("." in first["text"] or "," in first["text"] or ")" in first["text"])
+                      and re.fullmatch(r"\d[\d.,'‘’\"`\]\[|Il)]{1,12}", first["text"])
                       and (first.pop("_reattached", False) or body_word["box"][0]-first["box"][2] >= body*1.25))
             if bullet:
                 first["text"] = "•"
                 if raw != " ".join(word["text"] for word in words):
                     changes.append({"kind":"bullet", "before":raw.split()[0],
                                     "after":"•", "box":first["box"]})
-            elif number and (first["conf"] < 90 or not point_re.fullmatch(_normalize_point_text(first["text"]))):
+            elif number and (first["conf"] < 90 or not point_re.fullmatch(first["text"]) or first["text"] != _normalize_point_text(first["text"])):
                 corrected = _reread_number(image,first["box"],read,first["text"],first["conf"],read_unrestricted)
                 if corrected and corrected != first["text"]:
                     changes.append({"kind":"number", "before":first["text"],"after":corrected,"box":first["box"]})
@@ -499,6 +507,12 @@ def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None)
                 elif corrected is None:
                     diagnostics["needs_review"] = True
                     diagnostics["warnings"].append(f"Номер пункта {first['text']} не подтверждён повторным OCR области")
+            elif not number and isolated_section:
+                corrected = _reread_number(image,first["box"],read,first["text"],first["conf"],read_unrestricted)
+                if corrected:
+                    changes.append({"kind":"number", "before":first["text"],"after":corrected,"box":first["box"]})
+                    first["text"] = corrected
+                    number = True
             if read_unrestricted is not None:
                 for index, token in enumerate(words[1:], start=1):
                     height = token["box"][3]-token["box"][1]
@@ -532,7 +546,10 @@ def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None)
             gap = top-previous["box"][3] if previous else 0
             line_limit = max(body, line_h, previous["line_height"] if previous else 0) * 1.8
             hanging = (previous and previous["list_item"] and not number and not bullet and not dash_bullet
-                       and abs(left-previous["body_left"]) < max(3,body*.7) and 0 <= gap < line_limit)
+                       and 0 <= gap < line_limit
+                       and (abs(left-previous["body_left"]) < max(3,body*.7)
+                            or (abs(left-previous["box"][0]) < max(4,body*.8)
+                                and not previous["text"].rstrip().endswith((".", ";", ":", "!", "?")))))
             same_par = previous and previous["par_key"] == key
             continued_point = (previous and previous["numbered"] and not previous["list_item"]
                                and not previous["text"].rstrip().endswith((".",";",":"))
@@ -544,6 +561,14 @@ def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None)
             prev_center = (previous["box"][0] + previous["box"][2]) / 2 if previous else 0
             horiz_overlap = previous and min(right, previous["box"][2]) > max(left, previous["box"][0])
             similar_height = previous and abs(line_h - previous["line_height"]) <= max(3.0, body * 0.35)
+            continued_para = (
+                previous and not previous["list_item"] and not previous["numbered"]
+                and not bullet and not dash_bullet and not number
+                and not previous["text"].rstrip().endswith((".", ";", ":", "!", "?"))
+                and 0 <= gap < line_limit and similar_height
+                and (abs(left - previous["box"][0]) < max(4, body * 0.8)
+                     or abs(left - previous["body_left"]) < max(4, body * 0.8))
+            )
             prev_letters = [c for c in previous["text"] if c.isalpha()] if previous else []
             line_letters = [c for c in " ".join(w["text"] for w in words) if c.isalpha()]
             both_upper = bool(prev_letters and line_letters and all(c.isupper() for c in prev_letters) and all(c.isupper() for c in line_letters))
@@ -554,7 +579,7 @@ def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None)
                 and (horiz_overlap or abs(line_center - prev_center) <= max(10.0, body * 2.5))
                 and (first_alpha.islower() or both_upper)
             )
-            if not previous or bullet or dash_bullet or number or not (same_par or hanging or continued_point or wrapped_heading):
+            if not previous or bullet or dash_bullet or number or not (same_par or hanging or continued_point or continued_para or wrapped_heading):
                 body_left = words[1]["box"][0] if (bullet or dash_bullet or number) else left
                 group = {"words":[],"line":{},"box":[left,top,right,bottom],"confs":[],"heights":[],
                          "list_item":bool(bullet or dash_bullet),"numbered":bool(number),"body_left":body_left,
@@ -577,6 +602,165 @@ def _layout_groups(paragraphs, image, read, diagnostics, read_unrestricted=None)
             group["raw_text"] = (group["raw_text"]+" "+raw).strip()
             group["layout_corrections"].extend(changes)
     return groups
+
+
+def _cluster_lines(positions, min_gap: int) -> list[int]:
+    """Collapse thick ruled-line runs into single center coordinates."""
+    if len(positions) == 0:
+        return []
+    clusters = [[int(positions[0]), int(positions[0])]]
+    for pos in positions[1:]:
+        p = int(pos)
+        if p - clusters[-1][1] <= min_gap:
+            clusters[-1][1] = p
+        else:
+            clusters.append([p, p])
+    return [(a + b) // 2 for a, b in clusters]
+
+
+def _find_ruled_table_grid(image) -> tuple[list[int], list[int]] | None:
+    """Detect grid coordinates (xs, ys) for scanned pages containing a bordered table."""
+    import numpy as np
+    gray = np.asarray(image.convert("L"))
+    if gray.ndim != 2 or gray.shape[0] < 150 or gray.shape[1] < 150:
+        return None
+    ink = gray < 175
+    h, w = ink.shape
+    dil_v = ink.copy()
+    for shift in range(-3, 4):
+        if shift > 0:
+            dil_v[shift:, :] |= ink[:-shift, :]
+        elif shift < 0:
+            dil_v[:shift, :] |= ink[-shift:, :]
+    h_win = max(60, int(w * 0.20))
+    cs_h = np.pad(np.cumsum(dil_v.astype(np.int32), axis=1), ((0, 0), (1, 0)))
+    h_mask = ((cs_h[:, h_win:] - cs_h[:, :-h_win]) >= int(h_win * 0.86)).any(axis=1)
+    ys = _cluster_lines(np.where(h_mask)[0], max(8, int(h * 0.004)))
+    if len(ys) < 3 or ys[-1] - ys[0] < h * 0.12:
+        return None
+    sub = ink[ys[0] : ys[-1] + 1, :]
+    dil_h = sub.copy()
+    for shift in range(-4, 5):
+        if shift > 0:
+            dil_h[:, shift:] |= sub[:, :-shift]
+        elif shift < 0:
+            dil_h[:, :shift] |= sub[:, -shift:]
+    v_win = max(40, int((ys[-1] - ys[0]) * 0.22))
+    cs_v = np.pad(np.cumsum(dil_h.astype(np.int32), axis=0), ((1, 0), (0, 0)))
+    v_mask = ((cs_v[v_win:, :] - cs_v[:-v_win, :]) >= int(v_win * 0.85)).any(axis=0)
+    xs = _cluster_lines(np.where(v_mask)[0], max(8, int(w * 0.004)))
+    if len(xs) < 3 or xs[-1] - xs[0] < w * 0.25:
+        return None
+    # Recover shaded header row whose top border shares vertical outer edges above ys[0].
+    search_top = max(0, ys[0] - int(h * 0.10))
+    if ys[0] - search_top > 25:
+        x_l, x_r = xs[0], xs[-1]
+        y_top = ys[0]
+        for y in range(ys[0] - 1, search_top - 1, -1):
+            has_l = bool(ink[y, max(0, x_l - 6) : min(w, x_l + 7)].any())
+            has_r = bool(ink[y, max(0, x_r - 6) : min(w, x_r + 7)].any())
+            if has_l and has_r:
+                y_top = y
+            elif ys[0] - y > 12:
+                break
+        if ys[0] - y_top >= 25:
+            ys.insert(0, y_top)
+    return xs, ys
+
+
+def _extract_table_item(words: list[dict], grid: tuple[list[int], list[int]], body_height: float):
+    """Partition OCR words into bordered grid cells when a valid table is detected."""
+    import bisect
+    import re
+    xs, ys = grid
+    tx0, tx1 = xs[0], xs[-1]
+    ty0, ty1 = ys[0], ys[-1]
+    pad_x = max(6.0, body_height * 0.35)
+    pad_y = max(6.0, body_height * 0.35)
+    inside: list[dict] = []
+    outside: list[dict] = []
+    for word in words:
+        x0, y0, x1, y1 = word["box"]
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        if tx0 - pad_x <= cx <= tx1 + pad_x and ty0 - pad_y <= cy <= ty1 + pad_y:
+            inside.append(word)
+        else:
+            outside.append(word)
+    if len(inside) < 4:
+        return None, words
+
+    nrows = len(ys) - 1
+    ncols = len(xs) - 1
+    cells: dict[tuple[int, int], list[dict]] = {}
+    confs: list[float] = []
+    for word in inside:
+        x0, y0, x1, y1 = word["box"]
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        txt = word["text"].strip("|") if "|" in word["text"] else word["text"]
+        if not txt or (
+            word["text"] in ("|", "l", "I", "—", "_", "-", "__")
+            and min(abs(cx - xg) for xg in xs) <= max(8.0, body_height * 0.45)
+        ):
+            continue
+        r = max(0, min(nrows - 1, bisect.bisect_right(ys, cy) - 1))
+        c = max(0, min(ncols - 1, bisect.bisect_right(xs, cx) - 1))
+        cleaned = dict(word)
+        cleaned["text"] = txt
+        cells.setdefault((r, c), []).append(cleaned)
+        confs.append(word["conf"])
+
+    if len(cells) < 4:
+        return None, words
+    occ_rows = {r for r, _ in cells}
+    occ_cols = {c for _, c in cells}
+    if len(occ_rows) < 2 or len(occ_cols) < 2:
+        return None, words
+
+    rows: list[list[str]] = []
+    line_tol = max(6.0, body_height * 0.55)
+    for r in range(nrows):
+        row_cells: list[str] = []
+        for c in range(ncols):
+            cwords = cells.get((r, c), [])
+            if not cwords:
+                row_cells.append("")
+                continue
+            cwords.sort(key=lambda w: (w["box"][1], w["box"][0]))
+            lines: list[list[dict]] = []
+            for w in cwords:
+                cy = (w["box"][1] + w["box"][3]) / 2.0
+                if lines and abs(cy - lines[-1][0]["_cy"]) <= line_tol:
+                    lines[-1].append({**w, "_cy": cy})
+                else:
+                    lines.append([{**w, "_cy": cy}])
+            cell_lines = []
+            for ln in lines:
+                ln.sort(key=lambda w: w["box"][0])
+                joined = " ".join(re.sub(r"^\||\|$", "", w["text"]).strip() for w in ln).strip()
+                if joined:
+                    cell_lines.append(joined)
+            row_cells.append(" ".join(cell_lines))
+        if any(cell for cell in row_cells):
+            rows.append(row_cells)
+
+    if len(rows) < 2:
+        return None, words
+
+    mean_conf = sum(confs) / len(confs) if confs else 0.0
+    table_box = [float(tx0), float(ty0), float(tx1), float(ty1)]
+    return {
+        "table": rows,
+        "text": "\n".join(" | ".join(r) for r in rows),
+        "raw_text": "\n".join(" | ".join(r) for r in rows),
+        "list_item": False,
+        "layout_corrections": [],
+        "work_bbox": table_box,
+        "lines": [],
+        "conf": mean_conf,
+        "height": body_height or 12.0,
+        "reference_markers": [],
+        "suspected_rule": False,
+    }, outside
 
 
 def make_ocr(tesseract_cmd=None, tessdata_dir=None):
@@ -631,7 +815,9 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
             diag.update(source="error", needs_review=True)
             diag["warnings"].append("Ошибка локального OCR")
             return OCRResult(**diag)
-        paragraphs = {}
+        import re
+        from statistics import median
+        all_words = []
         all_conf = []
         heights = []
         for i, word in enumerate(data["text"]):
@@ -643,20 +829,38 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
             if not word or conf < 0:
                 continue
             x, y, w, h = (float(data[k][i]) for k in ("left", "top", "width", "height"))
-            key = (data["block_num"][i], data["par_num"][i])
-            par = paragraphs.setdefault(key, {"confs": [], "heights": [], "box": [x,y,x+w,y+h], "line": {}, "words": []})
-            par["line"].setdefault(data["line_num"][i], []).append(word)
-            par["confs"].append(conf)
             all_conf.append(conf)
             heights.append(h)
-            par["heights"].append(h)
-            par["words"].append({"text": word, "conf": conf, "box": [x,y,x+w,y+h],
-                                 "line": data["line_num"][i]})
-            b = par["box"]
-            b[:] = [min(b[0],x), min(b[1],y), max(b[2],x+w), max(b[3],y+h)]
-        from statistics import median
+            all_words.append({
+                "text": word,
+                "conf": conf,
+                "box": [x, y, x + w, y + h],
+                "line": data["line_num"][i],
+                "key": (data["block_num"][i], data["par_num"][i]),
+            })
         body_height = median(heights) if heights else 0
         items = []
+        grid = _find_ruled_table_grid(work)
+        table_item = None
+        if grid is not None:
+            table_item, remaining_words = _extract_table_item(all_words, grid, body_height)
+            if table_item is not None:
+                all_words = remaining_words
+                table_item["bbox"] = _inverse_box(table_item["work_bbox"], steps, original_size, page_size)
+                table_item["page_size"] = [round(float(page_size[0]), 1), round(float(page_size[1]), 1)]
+                items.append(table_item)
+
+        paragraphs = {}
+        for word_rec in all_words:
+            x0, y0, x1, y1 = word_rec["box"]
+            par = paragraphs.setdefault(word_rec["key"], {"confs": [], "heights": [], "box": [x0, y0, x1, y1], "line": {}, "words": []})
+            par["line"].setdefault(word_rec["line"], []).append(word_rec["text"])
+            par["confs"].append(word_rec["conf"])
+            par["heights"].append(y1 - y0)
+            par["words"].append({"text": word_rec["text"], "conf": word_rec["conf"], "box": [x0, y0, x1, y1], "line": word_rec["line"]})
+            b = par["box"]
+            b[:] = [min(b[0], x0), min(b[1], y0), max(b[2], x1), max(b[3], y1)]
+
         def read_number(crop, psm):
             data = pytesseract.image_to_data(crop, lang="eng",
                 config=f"{config} --psm {psm} -c tessedit_char_whitelist=0123456789.", output_type=Output.DICT)
@@ -670,6 +874,9 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
 
         for par in _layout_groups(paragraphs,work,read_number,diag,read_unrestricted):
             text = " ".join(" ".join(words) for _, words in sorted(par["line"].items()))
+            suspected_rule = _rule_like_word(work, par["box"], text)
+            if not suspected_rule and re.fullmatch(r"[<>«»‹›_`~|\\/\s]+", text.strip()):
+                continue
             line_words: dict[int, list[dict]] = {}
             for word in par["words"]:
                 line_words.setdefault(word.get("line", 0), []).append(word)
@@ -694,10 +901,17 @@ def make_ocr(tesseract_cmd=None, tessdata_dir=None):
                           "conf": sum(par["confs"])/len(par["confs"]),
                           "work_bbox": par["box"], "height": median(par["heights"]),
                           "reference_markers": markers,
-                          "suspected_rule": _rule_like_word(work, par["box"], text)})
+                          "suspected_rule": suspected_rule})
+        items.sort(key=lambda item: item["work_bbox"][1])
         separator = _footnote_separator(work)
-        _classify_notes(items, body_height, work.height, separator)
+        _classify_notes([item for item in items if not item.get("table")], body_height, work.height, separator)
         for item in items:
+            if item.get("table"):
+                item["note"] = False
+                item["note_continuation"] = False
+                item["note_marker_uncertain"] = False
+                del item["work_bbox"], item["height"]
+                continue
             if item["suspected_rule"]:
                 diag["needs_review"] = True
                 diag["warnings"].append("OCR принял линии таблицы за текст; результат сохранён как артефакт для проверки")
