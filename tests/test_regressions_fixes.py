@@ -171,7 +171,9 @@ def test_docx_unambiguous_manual_markers_and_warning_filtering(tmp_path):
 
     docs_js = (Path(__file__).resolve().parents[1] / "navigator" / "static" / "js" / "documents.js").read_text(encoding="utf-8")
     assert 'doc.status === "ready"' in docs_js
-    assert 'fillDetail(fragment, "reviewed", "пройдена")' in docs_js
+    # Ready/OCR confirmation must not masquerade as legal metadata review.
+    assert 'fillDetail(fragment, "reviewed", "пройдена")' not in docs_js
+    assert 'fillDetail(fragment, "reviewed", "не подтверждена")' in docs_js
 
 
 @pytest.mark.asyncio
@@ -437,7 +439,7 @@ def test_rag_kfo_definition_complete_without_spurious_warnings(tmp_path):
     assert any("полнота процедуры" in w for w in proc_resp.warnings)
 
 
-def test_ocr_and_visual_confirmation_warnings_do_not_cause_failed_or_unconfirmed_status(tmp_path):
+def test_warning_filtering_never_approves_documents_or_initial_reprocessing(tmp_path):
     import json
     from navigator.config import Settings
     from navigator.corpus import create_manifest
@@ -458,7 +460,7 @@ def test_ocr_and_visual_confirmation_warnings_do_not_cause_failed_or_unconfirmed
     assert filter_user_warnings(noisy + [real_problem], status="needs_review", needs_review=True) == [real_problem]
     assert is_actionable_warning(real_problem)
 
-    # 2. Verify startup status healing on stale DB records and safe reprocessing on initial-corpus docs.
+    # 2. Startup cannot infer approval from reviewed metadata or warning text.
     store = Store(tmp_path)
     cfg = Settings(_env_file=None, data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
     indexer = Indexer(store, cfg)
@@ -523,16 +525,16 @@ def test_ocr_and_visual_confirmation_warnings_do_not_cause_failed_or_unconfirmed
 
     healed_service = DocumentService(store, cfg, indexer=indexer)
     rec1 = healed_service.get_document(doc_reg.id)
-    assert rec1["status"] == "ready"
+    assert rec1["status"] == "failed"
     assert rec1["warnings"] == []
     assert rec1["metadata"]["reviewed"] is True
 
     rec2 = healed_service.get_document(doc_emp.id)
-    assert rec2["status"] == "ready"
+    assert rec2["status"] == "failed"
     assert rec2["warnings"] == []
-    assert rec2["metadata"]["reviewed"] is True
+    assert rec2["metadata"]["reviewed"] is False
 
-    # 3. Verify reprocessing / reocr on an already-published or initial-corpus doc never raises version/initial error.
+    # 3. Historical publication does not approve a fresh extraction of initial bytes.
     sources = tmp_path / "src"
     sources.mkdir()
     sample_html = "<html><body><p>Пункт 1. Обязательное положение регламента.</p></body></html>".encode("utf-8")
@@ -573,5 +575,5 @@ def test_ocr_and_visual_confirmation_warnings_do_not_cause_failed_or_unconfirmed
     svc_manifest.reocr_document(doc_init.id, reviewer="Администратор")
     assert svc_manifest.process_next_job()
     after_reocr = svc_manifest.get_document(doc_init.id)
-    assert after_reocr["status"] == "ready"
+    assert after_reocr["status"] == "failed"
     assert after_reocr["version"] == "v2"

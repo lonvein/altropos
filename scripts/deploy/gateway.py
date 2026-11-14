@@ -38,8 +38,9 @@ class ReaderGateway:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        async def reject(status, message):
-            body = json.dumps({"error": message}).encode()
+        async def reject(status, message, *, code=None):
+            error = {"code": code, "message": message, "retryable": False} if code else message
+            body = json.dumps({"error": error}).encode()
             await send({"type": "http.response.start", "status": status,
                         "headers": [(b"content-type", b"application/json"),
                                     (b"cache-control", b"no-store")]})
@@ -70,16 +71,22 @@ class ReaderGateway:
             return await reject(403, "Forbidden")
         read = (
             path in {"/", "/documents", "/favicon.ico"}
-            or path in {"/api/documents", "/api/ask/active"}
+            or path == "/api/documents"
             or re.fullmatch(r"/static/[a-zA-Z0-9_./-]+", path) is not None
             or re.fullmatch(r"/api/sources/[a-zA-Z0-9_-]+(?:/highlight)?", path) is not None
             or re.fullmatch(r"/api/documents/[a-zA-Z0-9_-]+/(?:original|view|original-info)", path) is not None
             or re.fullmatch(r"/api/documents/[a-zA-Z0-9_-]+/original-page/[0-9]+", path) is not None
-            or re.fullmatch(r"/api/ask/status/[a-zA-Z0-9_.:-]+", path) is not None
         )
         ask = path in {"/api/ask", "/api/search"} and method == "POST"
         if not ((read and method in {"GET", "HEAD"}) or ask):
+            if path == "/review" or path.startswith("/review-files/"):
+                return await reject(
+                    403,
+                    "Проверка распознавания доступна в административном интерфейсе.",
+                    code="admin_required",
+                )
             return await reject(403, "Reader access only")
+        scope = {**scope, "altropos.reader": True}
         if not ask:
             return await self.app(scope, receive, send)
         pairs = scope.get("headers", [])

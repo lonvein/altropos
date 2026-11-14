@@ -2,44 +2,48 @@
   "use strict";
 
   const A = window.Altropos;
-  const uploadForm = document.getElementById("upload-form");
-  if (!uploadForm) {
+  const documentsList = document.getElementById("documents-list");
+  if (!documentsList) {
     return;
   }
+  const uploadForm = document.getElementById("upload-form");
 
   const fileInput = document.getElementById("document-file");
   const uploadSubmit = document.getElementById("upload-submit");
-  const uploadLabel = uploadSubmit.querySelector(".button__label");
-  const uploadSpinner = uploadSubmit.querySelector(".spinner");
+  const uploadLabel = uploadSubmit?.querySelector(".button__label");
+  const uploadSpinner = uploadSubmit?.querySelector(".spinner");
   const uploadState = document.getElementById("upload-state");
   const uploadFieldError = document.getElementById("upload-field-error");
   const uploadJob = document.getElementById("upload-job");
   const uploadJobLabel = document.getElementById("upload-job-label");
   const uploadJobStatus = document.getElementById("upload-job-status");
   const uploadJobDetail = document.getElementById("upload-job-detail");
-  const maxUploadMb = Number(uploadForm.dataset.maxUploadMb) || 40;
+  const maxUploadMb = Number(uploadForm?.dataset.maxUploadMb) || 40;
 
   const importForm = document.getElementById("import-form");
   const importUrl = document.getElementById("import-url");
   const importPreviewSubmit = document.getElementById("import-preview-submit");
-  const importPreviewLabel = importPreviewSubmit.querySelector(".button__label");
-  const importPreviewSpinner = importPreviewSubmit.querySelector(".spinner");
+  const importPreviewLabel = importPreviewSubmit?.querySelector(".button__label");
+  const importPreviewSpinner = importPreviewSubmit?.querySelector(".spinner");
   const importState = document.getElementById("import-state");
   const importFieldError = document.getElementById("import-field-error");
   const importResult = document.getElementById("import-result");
   const importPageTitle = document.getElementById("import-page-title");
   const importPageExcerpt = document.getElementById("import-page-excerpt");
   const importEmpty = document.getElementById("import-empty");
+  const importFilter = document.getElementById("import-filter");
+  const importFilterField = document.getElementById("import-filter-field");
+  const importNoMatch = document.getElementById("import-no-match");
   const importLinks = document.getElementById("import-links");
   const importRejectedNote = document.getElementById("import-rejected-note");
   const importSelectedSubmit = document.getElementById("import-selected-submit");
   const importSelectedState = document.getElementById("import-selected-state");
+  const importOutcomes = document.getElementById("import-outcomes");
   const importJob = document.getElementById("import-job");
   const importJobLabel = document.getElementById("import-job-label");
   const importJobStatus = document.getElementById("import-job-status");
   const importJobDetail = document.getElementById("import-job-detail");
 
-  const documentsList = document.getElementById("documents-list");
   const documentsLoading = document.getElementById("documents-loading");
   const documentsEmpty = document.getElementById("documents-empty");
   const documentsError = document.getElementById("documents-error");
@@ -62,12 +66,15 @@
   const addRelation = document.getElementById("add-relation");
   const metadataError = document.getElementById("metadata-error");
   const metadataSubmit = document.getElementById("metadata-submit");
-  const metadataLabel = metadataSubmit.querySelector(".button__label");
-  const metadataSpinner = metadataSubmit.querySelector(".spinner");
+  const metadataLabel = metadataSubmit?.querySelector(".button__label");
+  const metadataSpinner = metadataSubmit?.querySelector(".spinner");
 
   let documents = [];
   let refreshTimer = null;
   let metadataDocument = null;
+  let previewUrl = "";
+  let importBusy = false;
+  const maxImportSelection = 10;
   const sourceViewer = typeof A.createSourceViewer === "function" ? A.createSourceViewer() : null;
   const selectedDocKey = "altropos.review.selectedDocumentId";
   const lastReviewKey = "altropos.review.lastResult";
@@ -143,7 +150,9 @@
         .join(" ");
     }
     if (Array.isArray(result.links)) {
-      return `Найдено разрешённых ссылок: ${result.links.length}. Выберите документы для импорта.`;
+      return result.links.length
+        ? `Найдено разрешённых ссылок: ${result.links.length}. Выберите документы для импорта.`
+        : "Разрешённых документов по этой ссылке не найдено.";
     }
     if (result.document_id) {
       const info = A.statusInfo(result.status, "document");
@@ -299,9 +308,7 @@
       fillDetail(fragment, "validity", validity.join(" "));
       if (metadata.reviewed === true) {
         fillDetail(fragment, "reviewed", "подтверждена администратором");
-      } else if (status === "ready") {
-        fillDetail(fragment, "reviewed", "пройдена");
-      } else if (metadata.reviewed === false && (status === "needs_review" || status === "failed" || warnings.length > 0)) {
+      } else if (metadata.reviewed === false) {
         fillDetail(fragment, "reviewed", "не подтверждена");
       }
       fillDetail(fragment, "relations", renderRelationsSummary(metadata.relations));
@@ -387,7 +394,7 @@
         });
       }
 
-      metadataButton.addEventListener("click", () => openMetadata(doc));
+      metadataButton?.addEventListener("click", () => openMetadata(doc));
       if (retryButton && ["needs_review", "failed", "error"].includes(status)) {
         A.show(retryButton, true);
         retryButton.addEventListener("click", async () => {
@@ -520,9 +527,9 @@
     }
   }
 
-  fileInput.addEventListener("change", () => showFieldError(uploadFieldError, ""));
+  fileInput?.addEventListener("change", () => showFieldError(uploadFieldError, ""));
 
-  uploadForm.addEventListener("submit", async (event) => {
+  uploadForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     showFieldError(uploadFieldError, "");
     const file = fileInput.files && fileInput.files[0];
@@ -651,10 +658,15 @@
   }
 
   function updateImportSelection() {
-    const checked = importLinks.querySelectorAll(".import-checkbox:checked");
-    const count = checked.length;
-    importSelectedSubmit.disabled = count === 0;
+    if (!importLinks || !importSelectedSubmit) {
+      return;
+    }
+    const count = importLinks.querySelectorAll(".import-checkbox:checked").length;
+    importSelectedSubmit.disabled = importBusy || !previewUrl || count === 0 || count > maxImportSelection;
     A.setText(importSelectedSubmit, count ? `Импортировать выбранные (${count})` : "Импортировать выбранные");
+    if (count > maxImportSelection) {
+      A.setText(importSelectedState, `За один раз можно импортировать до ${maxImportSelection} документов.`);
+    }
   }
 
   function appendImportLink(link) {
@@ -679,11 +691,28 @@
       A.setText(reasonNode, normalized.reason || "Ссылка не разрешена для импорта.");
       A.show(reasonNode, true);
     } else {
-      checkbox.addEventListener("change", updateImportSelection);
+      checkbox.addEventListener("change", () => {
+        if (!importBusy) {
+          A.setText(importSelectedState, "");
+          updateImportSelection();
+        }
+      });
     }
     importLinks.appendChild(fragment);
     return normalized.allowed;
   }
+
+  importFilter?.addEventListener("input", () => {
+    const query = importFilter.value.trim().toLocaleLowerCase("ru");
+    let matches = 0;
+    for (const item of importLinks.children) {
+      const text = item.querySelector(".import-link__title").textContent;
+      const visible = text.toLocaleLowerCase("ru").includes(query);
+      A.show(item, visible);
+      matches += Number(visible);
+    }
+    A.show(importNoMatch, matches === 0);
+  });
 
   function renderImportPreview(result, fallbackUrl) {
     const data = result || {};
@@ -715,6 +744,9 @@
     A.show(importRejectedNote, rejected.length > 0);
 
     A.show(importEmpty, allowedCount === 0);
+    importFilter.value = "";
+    A.show(importFilterField, allowedCount > 1);
+    A.show(importNoMatch, false);
     A.show(importResult, true);
     updateImportSelection();
   }
@@ -729,8 +761,19 @@
     throw new Error("Сервер не вернул идентификатор задания импорта.");
   }
 
-  importForm.addEventListener("submit", async (event) => {
+  importUrl?.addEventListener("input", () => {
+    previewUrl = "";
+    A.show(importResult, false);
+    A.show(importJob, false);
+    A.setText(importState, "");
+    updateImportSelection();
+  });
+
+  importForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (importBusy) {
+      return;
+    }
     showFieldError(importFieldError, "");
     A.setText(importSelectedState, "");
     const url = importUrl.value.trim();
@@ -741,18 +784,23 @@
       return;
     }
 
+    importBusy = true;
+    previewUrl = "";
+    importUrl.readOnly = true;
+    A.clear(importOutcomes);
+    A.show(importOutcomes, false);
     setButtonBusy(
       importPreviewSubmit,
       importPreviewLabel,
       importPreviewSpinner,
       true,
       "Проверяю…",
-      "Проверить страницу",
+      "Найти документы",
     );
-    A.setText(importState, "Загружаю страницу и ищу разрешённые документы…");
+    A.setText(importState, "Ищу документы по ссылке…");
     A.show(importResult, false);
     A.show(importJob, true);
-    A.setText(importJobLabel, "Задание проверки страницы");
+    A.setText(importJobLabel, "Поиск документов");
     renderJobBadge(importJobStatus, "queued");
     A.setText(importJobDetail, "Запрос отправлен…");
     importJob.classList.remove("is-error");
@@ -769,50 +817,54 @@
           importJobStatus,
           importJobDetail,
           update,
-          "Задание проверки страницы",
+          "Поиск документов",
         ),
       );
       if (job && (job.status === "error" || job.status === "failed")) {
-        throw new Error(job.error || "Задание проверки страницы завершилось ошибкой.");
+        throw new Error(job.error || "Не удалось найти документы по ссылке.");
       }
-      renderImportPreview(job ? job.result : response, url);
-      A.setText(importState, "Страница проверена. Выберите документы.");
+      const result = job ? job.result : response;
+      previewUrl = url;
+      renderImportPreview(result, url);
+      A.setText(importState, "");
     } catch (error) {
       importJob.classList.add("is-error");
       renderJobBadge(importJobStatus, "error");
       A.setText(importJobDetail, A.friendlyError(error));
-      A.setText(importState, "Не удалось проверить страницу. URL сохранён.");
+      A.setText(importState, "Не удалось проверить ссылку. URL сохранён.");
     } finally {
+      importBusy = false;
+      importUrl.readOnly = false;
+      updateImportSelection();
       setButtonBusy(
         importPreviewSubmit,
         importPreviewLabel,
         importPreviewSpinner,
         false,
         "Проверяю…",
-        "Проверить страницу",
+        "Найти документы",
       );
     }
   });
 
-  importSelectedSubmit.addEventListener("click", async () => {
-    showFieldError(importFieldError, "");
-    A.setText(importSelectedState, "");
-    const url = importUrl.value.trim();
-    const validation = validateMiptUrl(url);
-    if (validation) {
-      showFieldError(importFieldError, validation);
-      importUrl.focus();
+  importSelectedSubmit?.addEventListener("click", async () => {
+    if (importBusy || !previewUrl) {
       return;
     }
+    const url = previewUrl;
     const selected = Array.from(importLinks.querySelectorAll(".import-checkbox:checked"))
       .map((checkbox) => checkbox.dataset.url || checkbox.value)
       .filter(Boolean);
-    if (selected.length === 0) {
-      A.setText(importSelectedState, "Выберите хотя бы один документ.");
+    if (selected.length === 0 || selected.length > maxImportSelection) {
       return;
     }
 
-    importSelectedSubmit.disabled = true;
+    importBusy = true;
+    importUrl.readOnly = true;
+    importPreviewSubmit.disabled = true;
+    updateImportSelection();
+    A.clear(importOutcomes);
+    A.show(importOutcomes, false);
     A.setText(importSelectedState, "Импортирую выбранные документы…");
     A.show(importJob, true);
     A.setText(importJobLabel, "Задание импорта");
@@ -839,16 +891,34 @@
         throw new Error(job.error || "Задание импорта завершилось ошибкой.");
       }
       const result = job ? job.result : response;
-      const imported = result && Array.isArray(result.documents) ? result.documents.length : 0;
-      A.setText(importSelectedState, `Импорт завершён. Документов: ${imported}.`);
-      showDocumentsStatus(`Импорт завершён. Добавлено документов: ${imported}.`);
+      const imported = Array.isArray(result?.documents) ? result.documents : [];
+      const rejected = Array.isArray(result?.rejected) ? result.rejected : [];
+      A.setText(importSelectedState, `Получено документов: ${imported.length}. Отклонено ссылок: ${rejected.length}.`);
+      imported.forEach((doc) => {
+        const status = A.statusInfo(doc.status, "document").label;
+        const item = A.make("li", "", `${doc.title || doc.name || doc.id || "Документ"} · ${status}`);
+        if (["needs_review", "ready", "failed"].includes(doc.status) && doc.id) {
+          const review = A.make("a", "button button--ghost", "Открыть проверку");
+          review.href = `/review?doc=${encodeURIComponent(doc.id)}`;
+          item.appendChild(review);
+        }
+        importOutcomes.appendChild(item);
+      });
+      rejected.forEach(({ url: rejectedUrl, reason }) => {
+        importOutcomes.appendChild(A.make("li", "muted", `${rejectedUrl} — ${reason}`));
+      });
+      A.show(importOutcomes, importOutcomes.childElementCount > 0);
       await fetchDocuments({ silent: true });
     } catch (error) {
       importJob.classList.add("is-error");
       renderJobBadge(importJobStatus, "error");
       A.setText(importJobDetail, A.friendlyError(error));
-      A.setText(importSelectedState, "Импорт не выполнен. Выбор сохранён.");
+      A.setText(importSelectedState, "Не удалось получить результат импорта. Выбор сохранён.");
+      await fetchDocuments({ silent: true });
     } finally {
+      importBusy = false;
+      importUrl.readOnly = false;
+      importPreviewSubmit.disabled = false;
       updateImportSelection();
     }
   });
@@ -890,7 +960,7 @@
     items.forEach((relation) => relationsList.appendChild(buildRelationRow(relation)));
   }
 
-  addRelation.addEventListener("click", () => {
+  addRelation?.addEventListener("click", () => {
     relationsList.appendChild(
       buildRelationRow({ target_id: "", kind: "amends", target_section: "", confirmed: false }),
     );
@@ -916,7 +986,7 @@
     A.openDialog(metadataDialog);
   }
 
-  metadataForm.addEventListener("submit", async (event) => {
+  metadataForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     showFieldError(metadataError, "");
     const documentId = metadataDocumentId.value;

@@ -206,6 +206,83 @@ def test_fetch_mipt_bytes_enforces_max_bytes():
         fetch_mipt_bytes("https://mipt.ru/large.pdf", max_bytes=512, transport=transport)
 
 
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fc00::1", "224.0.0.1"])
+def test_import_transport_blocks_private_dns_before_connection(monkeypatch, address):
+    from navigator.documents import site_importer as module
+    monkeypatch.setattr(module.socket, "getaddrinfo", lambda *a, **kw: [(0, 0, 0, "", (address, 443))])
+    monkeypatch.setattr(module.httpx, "HTTPTransport", lambda **kw: httpx.MockTransport(
+        lambda request: pytest.fail("Private address must never be requested")))
+    with pytest.raises(ValueError, match="непубличных"):
+        fetch_mipt_bytes("https://internal.mipt.ru/file", max_bytes=100)
+
+
+def test_import_transport_pins_dns_preserves_tls_identity_and_checks_redirect(monkeypatch):
+    from navigator.documents import site_importer as module
+    lookups, requests = [], []
+    def resolve(host, port, **kw):
+        lookups.append(host)
+        return [(0, 0, 0, "", ("93.184.216.34" if host == "mipt.ru" else "127.0.0.1", port))]
+    def handler(request):
+        requests.append(request)
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["host"] == "mipt.ru"
+        assert request.extensions["sni_hostname"] == "mipt.ru"
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(302, headers={"location": "https://internal.mipt.ru/private"})
+    monkeypatch.setattr(module.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(module.httpx, "HTTPTransport", lambda **kw: httpx.MockTransport(handler))
+    with pytest.raises(ValueError, match="непубличных"):
+        fetch_mipt_bytes("https://mipt.ru/file", max_bytes=100)
+    assert lookups == ["mipt.ru", "internal.mipt.ru"]
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("url", ["https://mipt.ru:22/", "https://mipt.ru:bad/", "https://mi\npt.ru/", "https://mipt.ru/\rsecret"])
+def test_import_rejects_control_characters_and_ports(url):
+    with pytest.raises(ValueError):
+        validate_mipt_url(url)
+
+
+def test_import_refuses_compressed_body_before_decoding():
+    import gzip
+    transport = httpx.MockTransport(lambda request: httpx.Response(200,
+        headers={"content-encoding": "gzip"}, content=gzip.compress(b"x" * 10000)))
+    with pytest.raises(ValueError, match="сжатый"):
+        fetch_mipt_bytes("https://mipt.ru/file", max_bytes=100, transport=transport)
+
+
+def test_import_rejects_malformed_angular_sections():
+    transport = httpx.MockTransport(lambda request: httpx.Response(200,
+        text="<app-root></app-root>" if request.url.path != "/api/v1/" else '[{"sectionId": [], "code": "ru", "id": 1}]'))
+    with pytest.raises(ValueError, match="дерево разделов"):
+        inspect_mipt_page("https://mipt.ru/documents", max_bytes=1000, transport=transport)
+
+
+@pytest.mark.parametrize("status", ["failed", "needs_review"])
+@pytest.mark.parametrize("reviewed", [True, False])
+@pytest.mark.parametrize("active_publication", [True, False])
+def test_startup_never_approves_from_metadata_or_warning_prose(tmp_path, status, reviewed, active_publication):
+    settings = Settings(_env_file=None, data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
+    store = Store(tmp_path)
+    service = DocumentService(store, settings)
+    uploaded = service.upload_file("artificial.html", b"<p>SYNTHETIC pending review document.</p>")
+    assert service.process_next_job()
+    doc_id = uploaded["document_id"]
+    row = store.document(doc_id)
+    payload = json.loads(row["payload"])
+    payload["status"] = status
+    payload["metadata"]["reviewed"] = reviewed
+    payload["warnings"] = ["Страница 1: номер визуально подтверждён оператором по оригиналу"]
+    store.execute("UPDATE documents SET status=?,metadata=?,payload=?,active_publication=? WHERE id=?",
+        (status, json.dumps(payload["metadata"]), json.dumps(payload),
+         row["active_publication"] if active_publication else None, doc_id))
+    before = store.document(doc_id)
+    restarted = DocumentService(store, settings)
+    assert store.document(doc_id) == before
+    assert restarted.get_document(doc_id)["metadata"]["reviewed"] is reviewed
+    assert store.active_publications() == []
+
+
 def test_inspect_mipt_page_separates_allowed_and_rejected_links():
     page_html = """<!doctype html>
     <html lang="ru">
@@ -236,6 +313,70 @@ def test_inspect_mipt_page_separates_allowed_and_rejected_links():
     rejected_urls = {item["url"] for item in preview["rejected"]}
     assert "https://external.example.org/evil.pdf" in rejected_urls
     assert "https://mipt.ru/files/archive.zip" in rejected_urls
+
+
+def test_import_mipt_dynamic_page_and_download_endpoint(tmp_path):
+    page = "https://mipt.ru/it/documents"
+    url = "https://mipt.ru/docs/download.php?code=artificial-rule"
+    unsupported = "https://mipt.ru/docs/download.php?code=artificial-html"
+    filename = "Учебный регламент.docx"
+    requested = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        if str(request.url) == page:
+            return httpx.Response(200, text="<html><app-root></app-root></html>")
+        if request.url.params.get("action") == "blockPage.getList":
+            return httpx.Response(200, json=[
+                {"id": 1, "sectionId": None, "code": "ru"},
+                {"id": 2, "sectionId": 1, "code": "it"},
+                {"id": 3, "sectionId": 2, "code": "documents"},
+                {"id": 4, "sectionId": 1, "code": "documents"},
+            ])
+        if request.url.params.get("action") == "blockPage.getItems":
+            assert request.url.params["sectionId"] == "3"
+            return httpx.Response(200, json=[
+                {"previewText": "<h1>Документы</h1>"},
+                {"detailText": [{"html": (
+                    f'<a href="{url}"></a><a href="{url}">Учебный регламент</a>'
+                    f'<a href="{unsupported}">Другой файл</a>'
+                )}]},
+            ])
+        if str(request.url) == url:
+            return httpx.Response(200, content=_make_artificial_docx_bytes(), headers=[
+                (b"content-type", b"application/octet-stream"),
+                (b"content-disposition", f'attachment; filename="{filename}"'.encode()),
+            ])
+        if str(request.url) == unsupported:
+            return httpx.Response(200, text="<p>Файл отсутствует</p>")
+        return httpx.Response(404)
+
+    settings = Settings(data_dir=tmp_path, ml_enabled=False, llm_enabled=False)
+    service = DocumentService(Store(tmp_path), settings, http_transport=httpx.MockTransport(handler))
+    with TestClient(create_app(document_service=service)) as client:
+        def import_job(source, selected=()):
+            result = client.post("/api/import-url", json={"url": source, "selected_urls": selected})
+            assert result.status_code == 200
+            return _wait_job(client, result.json()["job_id"])
+
+        preview = import_job(page)["result"]
+        assert preview["page_title"] == "Документы"
+        assert [link["url"] for link in preview["links"]] == [url, unsupported]
+        assert preview["links"][0]["title"] == "Учебный регламент"
+        assert url not in requested and unsupported not in requested
+
+        direct = import_job(url)["result"]
+        assert direct["links"] == [{"url": url, "title": filename, "kind": "docx", "allowed": True}]
+        result = import_job(page, [url, unsupported])["result"]
+        assert len(result["documents"]) == len(result["rejected"]) == 1
+        document = result["documents"][0]
+        assert document["name"] == filename and document["source_url"] == url
+        assert document["status"] == "ready"
+        persisted = service.store.document(document["id"])
+        assert persisted["url"] == url
+        assert json.loads(persisted["payload"])["source_url"] == url
+        assert json.loads(persisted["payload"])["retrieved_at"]
+        assert client.get(f'/api/documents/{document["id"]}/review').status_code == 200
 
 
 # ---------------------------------------------------------------------------
